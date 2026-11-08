@@ -88,6 +88,7 @@ impl<S: 'static> AnyHost for Host<S> {
         }
         let launcher = self.launcher();
         if let Some(w) = &mut self.win && w.retry.is_some_and(|retry| retry <= Instant::now()) {
+            crate::low_power::count_wake(crate::low_power::WakeCause::Retry);
             w.retry = None;
             // A missed frame marked it occluded; look at the surface again.
             w.occluded = false;
@@ -99,6 +100,7 @@ impl<S: 'static> AnyHost for Host<S> {
         if matches!(cause, StartCause::ResumeTimeReached { .. } | StartCause::Poll)
             && timer_deadline(&self.rt).is_some_and(|deadline| deadline <= Instant::now())
         {
+            crate::low_power::count_wake(crate::low_power::WakeCause::Timer);
             let hidden = self.win.as_ref().is_none_or(|w| !w.visible);
             if hidden && !(launcher && self.hidden_launcher_renders()) {
                 // Hidden or windowless: poll and due timers run, and the view waits for the
@@ -175,12 +177,30 @@ impl<S: 'static> AnyHost for Host<S> {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: WakeEvent) {
         self.meter.waited();
+        crate::low_power::count_wake(match event {
+            WakeEvent::App(_) => crate::low_power::WakeCause::App,
+            WakeEvent::Live(_) => crate::low_power::WakeCause::Live,
+            _ => crate::low_power::WakeCause::OtherWake,
+        });
         self.handle_user_event(event_loop, event);
         self.publish();
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         if !matches!(event, WindowEvent::RedrawRequested) { self.meter.waited(); }
+        {
+            use crate::low_power::WakeCause as C;
+            crate::low_power::count_wake(match &event {
+                WindowEvent::RedrawRequested => C::Redraw,
+                WindowEvent::CursorMoved { .. } | WindowEvent::CursorEntered { .. } | WindowEvent::CursorLeft { .. }
+                    | WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. } => C::Pointer,
+                WindowEvent::KeyboardInput { .. } | WindowEvent::ModifiersChanged(_) => C::Key,
+                WindowEvent::Ime(_) => C::Ime,
+                WindowEvent::Focused(_) | WindowEvent::Occluded(_) | WindowEvent::Moved(_) | WindowEvent::Resized(_)
+                    | WindowEvent::ScaleFactorChanged { .. } | WindowEvent::ThemeChanged(_) => C::Window,
+                _ => C::OtherEvent,
+            });
+        }
         self.handle_window_event(event_loop, id, event);
         self.publish();
     }

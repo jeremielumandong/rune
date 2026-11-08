@@ -6,6 +6,8 @@ use crate::pixels::ImageAtlas;
 use crate::text::{ATLAS_SIZE, Atlas};
 
 mod backdrop_blur;
+pub(crate) mod cull;
+pub(crate) mod damage;
 mod dxbc;
 mod first_use;
 pub(crate) mod gpu_events;
@@ -496,6 +498,17 @@ impl Gpu {
     #[cfg(test)]
     pub(crate) fn headless_wgpu() -> Gpu {
         Self::new(Self::wgpu_instance(), None)
+    }
+
+    /// The adapter a window will draw with: `gpu::pick`'s choice for a surface not made yet,
+    /// as `warm_gpu` makes it, honouring `WGPU_ADAPTER_NAME` and `WGPU_POWER_PREF`
+    /// patch). For an app that decides before its first window whether it draws on a software
+    /// adapter (WARP, lavapipe); `None` when no adapter is found.
+    #[cfg(not(any(target_arch = "wasm32", target_vendor = "apple")))]
+    pub fn window_adapter_info() -> Option<wgpu::AdapterInfo> {
+        let instance = Self::instance();
+        let _serial = GPU_INIT.lock().unwrap_or_else(|e| e.into_inner());
+        crate::gpu::pick::pick(&instance, None, true).ok().map(|pick| pick.adapter.get_info())
     }
 
     /// Without `VALIDATION_INDIRECT_CALL`: Rune issues no indirect draws or dispatches, and the

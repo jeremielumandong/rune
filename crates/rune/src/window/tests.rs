@@ -110,6 +110,15 @@ fn a_frame_that_draws_the_same_pixels_is_the_same() {
     rt.text.atlas.dirty = Some((0, 1));
     assert!(!p.same(&rt, &config), "a glyph upload draws again");
     rt.text.atlas.dirty = None;
+    // Glyph work whose upload an earlier, unpresented frame already took (a frame skipped
+    // for want of a drawable, a hidden one): the next frame still presents it.
+    rt.text.atlas.rasterized += 1;
+    assert!(!p.same(&rt, &config), "a glyph rasterized since draws again");
+    rt.text.atlas.rasterized -= 1;
+    rt.text.atlas.resets += 1;
+    assert!(!p.same(&rt, &config), "glyphs placed again since draw again");
+    rt.text.atlas.resets -= 1;
+    assert!(p.same(&rt, &config));
 
     rt.update(|n, _| *n = 8);
     rt.settle_all();
@@ -629,4 +638,31 @@ fn moving_a_window_reuses_its_scene_and_a_resize_draws_once() {
     assert_eq!(input_frames(&mut host, |_| {}), 1, "a resize draws once");
     assert_eq!(host.rt.stats.commits, commits + 1, "one layout");
     assert_eq!(VIEWS.get(), views, "and no view");
+}
+
+/// The WARP report of ~350 builds a second that drew nothing: a frame built for a wake or an
+/// update that changed nothing presents nothing and leaves nothing that asks for another
+/// (no timer, no stale tree, no motion), so the window goes back to sleep.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn an_unchanged_frame_requests_no_further_frame() {
+    let mut host = on_demand_host();
+    for n in 0..50 {
+        host.rt.update(|_, _| {});
+        assert!(!host.frame(draw::ON_DEMAND), "build {n} presents nothing");
+        assert!(host.idle, "and the window rests");
+        assert!(!host.rt.stale() && !host.rt.has_pending_input(), "with nothing left to build");
+        assert_eq!(host.rt.wake_deadline(), None, "or to wake for");
+    }
+    assert_eq!(input_frames(&mut host, |rt| rt.pointer_move(80.0, 20.0)), 0);
+}
+
+#[test]
+fn a_drawable_never_takes_a_size_that_wrapped_below_zero() {
+    // Windows, mid-resize under WARP: "Requested was (1156, 65527)".
+    assert_eq!(drawable_size((1156, 65527), 16384), None);
+    assert_eq!(drawable_size((u32::MAX, 550), 16384), None);
+    assert_eq!(drawable_size((829, 550), 16384), Some((829, 550)));
+    assert_eq!(drawable_size((0, 0), 16384), Some((1, 1)), "a minimised window still configures");
+    assert_eq!(drawable_size((16384, 16384), 16384), Some((16384, 16384)));
 }

@@ -12,8 +12,12 @@
 //!   blur out of the painted frame; crisp (zero-blur) shadows, which draw as rings or solid
 //!   copies, stay.
 //!
+//! Low power also redraws only what changed (`render/damage.rs`): the window keeps its last
+//! frame in a texture, shades again only the rectangles whose instances changed, and copies
+//! that texture to the drawable. [`redrawn_pixels`] counts what it shaded.
+//!
 //! A resize the user drags still draws at once, and nothing changes the surface's present mode.
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 static LOW_POWER: AtomicBool = AtomicBool::new(false);
@@ -44,11 +48,92 @@ pub fn software_rendering_effects() -> bool {
     SOFTWARE_EFFECTS.load(Ordering::Relaxed)
 }
 
+static REDRAWN: AtomicU64 = AtomicU64::new(0);
+static WINDOW_PIXELS: AtomicU64 = AtomicU64::new(0);
+static QUAD_PIXELS: AtomicU64 = AtomicU64::new(0);
+
+/// Pixel counts of low-power windows' frames since the process started.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RedrawnPixels {
+    /// The window pixels redrawn (scissored), after damage tracking.
+    pub shaded: u64,
+    /// The window pixels the frames covered: what full redraws would have shaded.
+    pub window: u64,
+    /// The pixels the frames' quads rasterize, summed over their quads whatever their clips
+    /// show: what full redraws run the shader on (each pixel once per quad over it).
+    pub quads: u64,
+}
+
+pub fn redrawn_pixels() -> RedrawnPixels {
+    RedrawnPixels { shaded: REDRAWN.load(Ordering::Relaxed), window: WINDOW_PIXELS.load(Ordering::Relaxed),
+        quads: QUAD_PIXELS.load(Ordering::Relaxed) }
+}
+
+pub(crate) fn count_redrawn(shaded: u64, window: u64, quads: u64) {
+    REDRAWN.fetch_add(shaded, Ordering::Relaxed);
+    WINDOW_PIXELS.fetch_add(window, Ordering::Relaxed);
+    QUAD_PIXELS.fetch_add(quads, Ordering::Relaxed);
+}
+
 /// When the frame after one that started at `started` and was presented at `presented` may
 /// start.
 pub fn next_frame_at(started: Instant, presented: Instant) -> Instant {
     let cost = presented.saturating_duration_since(started).min(MAX_FRAME_COST);
     (started + FRAME_INTERVAL).max(presented + cost)
+}
+
+/// When a shown window's next frame may start in low-power mode, after one that started at
+/// `started` and finished building, or presenting, at `finished`; `None` when not paced.
+/// Frames that build and present nothing new (on-demand frames, `FrameOutcome::Unchanged`)
+/// are paced too: a stream of wakes or window events that change nothing (an app waking its
+/// loop hundreds of times a second, a platform echoing each frame's IME or cursor update)
+/// builds at most one frame a pace instead of one each.
+pub(crate) fn pace_after(shown: bool, started: Instant, finished: Instant) -> Option<Instant> {
+    (shown && low_power_rendering()).then(|| next_frame_at(started, finished))
+}
+
+/// What woke a window's loop or asked it for a frame, counted while low power is on, for an
+/// app's frame log ([`take_wake_causes`]): what keeps a resting window building frames.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(usize)]
+pub enum WakeCause {
+    /// `AppHandle::update`, `wake` or a waker (`WakeEvent::App`).
+    App,
+    /// A live value (`WakeEvent::Live`).
+    Live,
+    /// Another `WakeEvent`: a window request, focus, a frame change, accessibility.
+    OtherWake,
+    /// A due timer (`Tx::wake_after`).
+    Timer,
+    /// A paced or missed frame's retry.
+    Retry,
+    /// `RedrawRequested` from the platform.
+    Redraw,
+    /// Pointer motion, presses and wheel.
+    Pointer,
+    /// Keys and modifiers.
+    Key,
+    /// Input method events.
+    Ime,
+    /// Focus, occlusion, move, resize, scale, theme.
+    Window,
+    /// Any other window event.
+    OtherEvent,
+}
+
+const CAUSES: [&str; 11] = ["app", "live", "other wake", "timer", "retry", "redraw", "pointer", "key", "ime", "window", "other event"];
+
+static WAKES: [AtomicU64; 11] = [const { AtomicU64::new(0) }; 11];
+
+pub(crate) fn count_wake(cause: WakeCause) {
+    if low_power_rendering() { WAKES[cause as usize].fetch_add(1, Ordering::Relaxed); }
+}
+
+/// The causes counted since the last call, most first, leaving out those that didn't happen.
+pub fn take_wake_causes() -> Vec<(&'static str, u64)> {
+    let mut out: Vec<_> = CAUSES.iter().zip(&WAKES).map(|(name, n)| (*name, n.swap(0, Ordering::Relaxed))).filter(|(_, n)| *n > 0).collect();
+    out.sort_by(|a, b| b.1.cmp(&a.1));
+    out
 }
 
 /// The interval a timer that asks for every frame steps at with no display link: `default`,
@@ -84,6 +169,22 @@ mod tests {
         let start = Instant::now();
         let presented = start + Duration::from_millis(400);
         assert_eq!(next_frame_at(start, presented), presented + MAX_FRAME_COST);
+    }
+
+    /// 350 requests a second for frames that change nothing, as a WARP window saw: each build
+    /// paces the next, so about 30 build.
+    #[test]
+    fn frames_that_change_nothing_build_at_the_pace() {
+        let start = Instant::now();
+        let (mut builds, mut paced_until) = (0, None::<Instant>);
+        for n in 0..350u32 {
+            let now = start + Duration::from_micros(u64::from(n) * 2_857);
+            if paced_until.is_some_and(|at| at > now) { continue; }
+            builds += 1;
+            // A 3 ms build, then the pace `pace_after` sets in low power.
+            paced_until = Some(next_frame_at(now, now + Duration::from_millis(3)));
+        }
+        assert!((29..=31).contains(&builds), "{builds} builds");
     }
 
     #[test]

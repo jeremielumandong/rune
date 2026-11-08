@@ -165,6 +165,9 @@ impl<S: 'static> Host<S> {
                 l.stop_pacing();
                 self.meter.set_pacing(l.pacing_state(false));
                 self.frame_reports.unchanged(target);
+                // Low power paces builds as it paces draws: a stream of wakes or events that
+                // change nothing builds at most one frame a pace, not one each (`low_power`).
+                l.paced_until = crate::low_power::pace_after(!hidden, started, Instant::now());
                 return;
             }
             Some((animating, dt, now))
@@ -258,6 +261,23 @@ impl<S: 'static> Host<S> {
             format: (target_format != l.config.format).then_some(target_format),
             ..Default::default()
         });
+        // Low power: what changed since the kept frame, before the uploads take the image
+        // atlas's written rows (`render/damage.rs`).
+        let size = (l.config.width, l.config.height);
+        // Low power: the instances with the pixels they can't change kept from the shader
+        // (`render/cull.rs`).
+        let culled = crate::low_power::low_power_rendering() && self.comp.is_none();
+        if culled { crate::render::cull::cull(&rt.instances, size, &mut l.culled); }
+        let instances = if culled { &l.culled[..] } else { &rt.instances[..] };
+        let tracked = (crate::low_power::low_power_rendering() && self.comp.is_none() && l.alpha.is_none() && !rt.transparent
+            && rt.surfaces.is_empty() && rt.materials.is_empty() && frame.texture.usage().contains(wgpu::TextureUsages::COPY_DST))
+            .then(|| {
+                l.retained.fit(&gpu.device, l.config.format, target_format, size);
+                let around = crate::render::damage::Surroundings { size, clear: rt.clear_color(), srgb: rt.srgb_blend(),
+                    scale: rt.env.scale, atlas_resets: rt.text.atlas.resets };
+                let texels = crate::render::damage::Texels::of(&rt.images);
+                (around, l.retained.damage(instances, around, &texels))
+            });
         renderer.upload_images(&gpu.device, &gpu.queue, &mut rt.images);
         renderer.prepare_surfaces(&gpu.device, &gpu.queue, &rt.surfaces, (l.config.width, l.config.height));
         let mut enc = gpu.device.create_command_encoder(&Default::default());
@@ -277,9 +297,24 @@ impl<S: 'static> Host<S> {
             };
             c.render(&mut f);
             animating |= c.animating();
+            l.retained.forget();
         } else {
-            renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (l.config.width, l.config.height));
-            renderer.draw(&mut enc, target, rt.clear_color());
+            renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, instances, (l.config.width, l.config.height));
+            match tracked.filter(|_| renderer.damage_tracking_fits()) {
+                Some((around, damage)) => {
+                    l.retained.fit_fill(&gpu.device, &gpu.queue, around.clear);
+                    l.retained.blit(&gpu.device, &mut enc);
+                    if let (Some(kept), Some(fill)) = (l.retained.view(), l.retained.fill()) {
+                        renderer.draw_damaged(&mut enc, kept, around.clear, &damage, fill);
+                        l.retained.copy_to(&mut enc, &frame.texture);
+                    }
+                    l.retained.drawn(around, &damage);
+                }
+                None => {
+                    renderer.draw(&mut enc, target, rt.clear_color());
+                    l.retained.forget();
+                }
+            }
         }
         if let Some(alpha) = &l.alpha { alpha.draw(&mut enc, &view); }
         renderer.submit(&gpu.queue, enc);
@@ -306,7 +341,7 @@ impl<S: 'static> Host<S> {
             l.native.cloak.lift(&l.window);
         }
         let submitted = Instant::now();
-        l.paced_until = (!hidden && crate::low_power::low_power_rendering()).then(|| crate::low_power::next_frame_at(started, submitted));
+        l.paced_until = crate::low_power::pace_after(!hidden, started, submitted);
         self.meter.presented();
         #[cfg(target_os = "macos")]
         if let Some(pacing) = &mut l.native.pacing { pacing.presented(submitted); }

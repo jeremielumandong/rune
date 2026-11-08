@@ -629,6 +629,12 @@ impl Renderer {
                     let (x1, y1) = (edge(l.clip[2].ceil(), origin[0], size[0]), edge(l.clip[3].ceil(), origin[1], size[1]));
                     if x1 > x0 && y1 > y0 {
                         let outer = pass.scissor();
+                        // Inside the scissor already set (a damaged rectangle, `render/damage.rs`).
+                        let (x0, y0, x1, y1) = match outer {
+                            Some([ox, oy, ow, oh]) => (x0.max(ox), y0.max(oy), x1.min(ox + ow), y1.min(oy + oh)),
+                            None => (x0, y0, x1, y1),
+                        };
+                        if x1 <= x0 || y1 <= y0 { cursor = l.end + 1; continue; }
                         pass.set_scissor(Some([x0, y0, x1 - x0, y1 - y0]), size);
                         self.draw_layer_range(pass, format, l.begin + 1..l.end, target, hook);
                         pass.set_scissor(outer, size);

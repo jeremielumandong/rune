@@ -37,12 +37,20 @@ pub(super) struct Win {
     pub(super) presented: Option<Presented>,
     /// Low-power mode: when the next frame may start (`low_power::next_frame_at`).
     pub(super) paced_until: Option<Instant>,
+    /// Low-power mode: the last frame, kept to redraw only what changes (`render/damage.rs`).
+    pub(super) retained: crate::render::damage::Retained,
+    /// Low-power mode: this frame's instances as drawn (`render/cull.rs`).
+    pub(super) culled: Vec<crate::render::Instance>,
+    /// The IME cursor area last handed to the platform (`sync_platform`).
+    pub(super) ime_area: Option<[f32; 4]>,
 }
 
 impl Win {
-    /// Matches the drawable to the window's size; false when it already did.
+    /// Matches the drawable to the window's size; false when it already did, or when the size
+    /// is bogus (`drawable_size`), which keeps the drawable until a real size comes.
     pub(super) fn resize_surface(&mut self, device: &wgpu::Device, size: winit::dpi::PhysicalSize<u32>) -> bool {
-        let (width, height) = (size.width.max(1), size.height.max(1));
+        let max = device.limits().max_texture_dimension_2d;
+        let Some((width, height)) = super::drawable_size((size.width, size.height), max) else { return false };
         if (self.config.width, self.config.height) == (width, height) { return false; }
         self.config.width = width;
         self.config.height = height;
