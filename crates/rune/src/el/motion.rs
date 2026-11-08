@@ -167,6 +167,16 @@ impl El {
         self.instant_changes = true;
         self
     }
+    /// Animate the changes inside this element again under an
+    /// [`instant_changes`](Self::instant_changes) ancestor: its subtree's layout, opacity and
+    /// transforms spring, and the elements it gains or loses play their transitions. This
+    /// element's own entrance and exit, and its own place among its siblings, still follow its
+    /// ancestor, so a screen that swaps it in shows it at once. One composer or card whose
+    /// local motion is meant, in a window whose content swaps land at once.
+    pub fn animated_changes(mut self) -> Self {
+        self.vis.cold_mut().animated_changes = true;
+        self
+    }
     /// How this element enters and exits when mounted or removed after the first frame
     /// (default: [`Transition::opacity()`] — a 0.2 s enter and 0.15 s exit fade). Because
     /// every element has this default fade, removing an element in an animated commit

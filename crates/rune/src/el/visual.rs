@@ -82,6 +82,9 @@ pub struct VisualCold {
     /// A scroll area's wrapper (`El::wrap_scroll_area`): rectangular clips and fades set on it
     /// go to its first child, the viewport, so what it draws beside that stays whole.
     pub(crate) clip_to_content: bool,
+    /// `El::animated_changes`: this subtree animates again under an `El::instant_changes`
+    /// ancestor.
+    pub(crate) animated_changes: bool,
 }
 
 impl Empty for VisualCold {
@@ -121,6 +124,7 @@ impl Empty for VisualCold {
         motion_intent: crate::el::motion::MotionIntent::NONE,
         instant_motion: false,
         clip_to_content: false,
+        animated_changes: false,
     };
 }
 

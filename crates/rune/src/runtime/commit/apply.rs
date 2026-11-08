@@ -586,7 +586,8 @@ impl<S: 'static> Runtime<S> {
             {
                 let content = &spec.content;
                 let now = if time_scaled { self.scene.store().node_time(id) } else { now };
-                let fade = if self.reduced_motion { 0.15 } else { spec.reveal };
+                // Reduce Motion shortens a reveal; one of 0 (words shown at once) stays at once.
+                let fade = if self.reduced_motion && spec.reveal > 0.0 { spec.reveal.min(0.15) } else { spec.reveal };
                 let mounted_late = !was_present && !instant && !nodes[i].virtual_mount;
                 let st = self.reveals.entry(id).or_insert_with(|| RevealState {
                     len: if mounted_late { 0 } else { content.len() },
