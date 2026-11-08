@@ -45,6 +45,79 @@ fn movable(i: &Instance) -> bool {
     !(kind == KIND_LAYER || kind == KIND_LAYER_END || kind == KIND_EFFECT || kind == KIND_BACKDROP_BLUR) && kind.is_finite()
 }
 
+/// Whether a layer record composites what it holds the same wherever it moves by whole
+/// pixels: no blur (whose taps reach past what moved), turn or cache.
+fn plain_layer(i: &Instance) -> bool {
+    i.params[1] == KIND_LAYER && i.params[2] == 0.0 && i.params[3] == 0.0 && i.border == [0.0; 4]
+}
+
+/// Each outermost layer's instances, `first..past`, from its record to its end.
+fn layers(p: &Painted) -> Vec<(usize, usize)> {
+    let mut out: Vec<(usize, usize)> = Vec::new();
+    for (k, &s) in p.scopes.iter().enumerate() {
+        if s == NONE { continue; }
+        match out.last_mut() {
+            Some(last) if last.1 == k && p.scopes[last.0] == s => last.1 = k + 1,
+            _ => out.push((k, k + 1)),
+        }
+    }
+    out
+}
+
+/// How far an instance's rounded clip bends in from its edges: continuous corners bend in
+/// further than circular ones of the same radius.
+fn radius(i: &Instance) -> f32 {
+    unpack_clip_radii(i.fade[3]).iter().fold(0.0f32, |m, r| m.max(r.abs() * 1.6))
+}
+
+/// A layer's instances hashed but for their y coordinates.
+fn layer_key(p: &Painted, a: usize, b: usize) -> u64 {
+    p.instances[a..b].iter().fold(0xcbf2_9ce4_8422_2325u64, |h, i| (h ^ hash_words(&canon(i, 0.0, false, true))).wrapping_mul(0x0000_0100_0000_01b3))
+}
+
+/// How each instance of a layer moved `dy` from `old` to `new`, when all of them did (as
+/// `moved_near` finds, when `edges` are given) and its records are `plain_layer`s; an end record
+/// counts as moved with its clip.
+fn moved_layer(old: &[Instance], new: &[Instance], dy: f32, edges: Option<[f32; 4]>) -> Option<Vec<Pair>> {
+    old.iter().zip(new).map(|(o, n)| {
+        let kind = n.params[1];
+        if kind == KIND_LAYER_END { return same(o, n).then_some(Pair::Moved(true)); }
+        if !(movable(n) || plain_layer(n)) || (kind == KIND_LAYER && !plain_layer(o)) { return None; }
+        if let Some(edges) = edges { return moved_near(o, n, dy, edges); }
+        let mine = canon(n, 0.0, false, false);
+        if canon(o, dy, false, false) == mine { Some(Pair::Moved(false)) }
+        else if canon(o, dy, true, false) == mine { Some(Pair::Moved(true)) }
+        else { None }
+    }).collect()
+}
+
+/// How `n` is `o` moved `dy`, its y coordinates within a step of `1/Q` px either way (a
+/// position computed another way can round to the next step): with its clip kept or moved, or
+/// moved with clips the viewport's edge cuts differently, alike between `edges`' top and bottom
+/// (the pixels a move can reach). Faded clips, whose ramps start at their edges, are not cut.
+fn moved_near(o: &Instance, n: &Instance, dy: f32, edges: [f32; 4]) -> Option<Pair> {
+    let ys = y_words(n.params[1]);
+    let (ow, nw): ([u32; 32], [u32; 32]) = (bytemuck::cast(*o), bytemuck::cast(*n));
+    let near = |a: &[u32; 32], b: &[u32; 32]| (0..32).all(|k| {
+        if (ys.contains(&k) || (k == 3 && derived_height(n.params[1]))) && a[k] != b[k] {
+            let (x, y) = (f32::from_bits(ow[k]), f32::from_bits(nw[k]));
+            x.is_finite() && y.is_finite() && x.abs() < 1.0e7 && y.abs() < 1.0e7 && (a[k] as i32).abs_diff(b[k] as i32) <= 1
+        } else {
+            a[k] == b[k]
+        }
+    });
+    let mine = canon(n, 0.0, false, false);
+    if near(&canon(o, dy, false, false), &mine) { return Some(Pair::Moved(false)); }
+    let mut moved = canon(o, dy, true, false);
+    if near(&moved, &mine) { return Some(Pair::Moved(true)); }
+    if o.fade[..3] != [0; 3] || n.fade[..3] != [0; 3] { return None; }
+    let q = |v: f32| ((v * Q).round() as i32) as u32;
+    let mut mine = mine;
+    (moved[25], moved[27]) = (q((o.clip[1] + dy).max(edges[1])), q((o.clip[3] + dy).min(edges[3])));
+    (mine[25], mine[27]) = (q(n.clip[1].max(edges[1])), q(n.clip[3].min(edges[3])));
+    near(&moved, &mine).then_some(Pair::Cut)
+}
+
 /// An instance's words with its y coordinates moved `dy` (its clip's too when `clip_moves`) and
 /// fixed to `1/Q` px, or zeroed when `zero`, for hashing and comparing.
 fn canon(i: &Instance, dy: f32, clip_moves: bool, zero: bool) -> [u32; 32] {
@@ -61,8 +134,16 @@ fn canon(i: &Instance, dy: f32, clip_moves: bool, zero: bool) -> [u32; 32] {
             w[k]
         };
     }
+    // A segment's or triangle's rect bounds its points, its height their difference, which
+    // can round differently as they move.
+    if derived_height(i.params[1]) {
+        let h = i.rect[3];
+        w[3] = if zero { 0 } else if h.is_finite() && h.abs() < 1.0e7 { ((h * Q).round() as i32) as u32 } else { w[3] };
+    }
     w
 }
+
+fn derived_height(kind: f32) -> bool { kind == KIND_SEGMENT || kind == KIND_TRIANGLE }
 
 fn hash_words(w: &[u32; 32]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -161,6 +242,13 @@ enum Pair {
     Same,
     /// Moved by the offset; whether its clip moved too.
     Moved(bool),
+    /// Moved by the offset with its clip, which the viewport's edge cuts differently: alike
+    /// between the edges but for its rounded corners.
+    Cut,
+}
+
+impl Pair {
+    fn moved(self) -> bool { matches!(self, Pair::Moved(_) | Pair::Cut) }
 }
 
 /// The move that follows a scroll from `old` to `new`, with the edges still to redraw pushed
@@ -180,7 +268,9 @@ pub(super) fn scrolled(old: &Painted, new: &Painted, size: (u32, u32), out: &mut
     }
     moved.sort_unstable_by_key(|e| (e.0, e.1));
     let mut used = vec![false; old.instances.len()];
-    let mut pairs: Vec<(u32, u32, Pair)> = Vec::new();
+    let mut taken = vec![false; new.instances.len()];
+    // (old, new, how, the outermost layer moved whole it belongs to or `NONE`)
+    let mut pairs: Vec<(u32, u32, Pair, u32)> = Vec::new();
     for j in 0..new.instances.len() {
         let n = &new.instances[j];
         let key = new.keys[j];
@@ -198,14 +288,31 @@ pub(super) fn scrolled(old: &Painted, new: &Painted, size: (u32, u32), out: &mut
         });
         if let Some((i, how)) = found {
             used[i as usize] = true;
-            pairs.push((i, j as u32, how));
+            taken[j] = true;
+            pairs.push((i, j as u32, how, NONE));
         }
     }
-    // Pairs out of their old order draw differently where they overlap.
-    let order: Vec<(u32, u32)> = pairs.iter().map(|p| (p.0, p.1)).collect();
-    for (p, kept) in pairs.iter_mut().zip(increasing(&order)) {
-        if !kept { p.2 = Pair::None; }
-    }
+    // An outermost layer (a rounded table, a code block) moves whole when all it holds moved.
+    let mut olds: Vec<(u64, usize, usize)> = layers(old).into_iter().map(|(a, b)| (layer_key(old, a, b), a, b)).collect();
+    olds.sort_unstable();
+    let news = layers(new);
+    let match_layers = |pairs: &mut Vec<(u32, u32, Pair, u32)>, used: &mut [bool], taken: &mut [bool], edges: Option<[f32; 4]>| {
+        for &(a, b) in &news {
+            if taken[a..b].iter().any(|t| *t) { continue; }
+            let key = layer_key(new, a, b);
+            let at = olds.partition_point(|e| e.0 < key);
+            let Some((from, ways)) = olds[at..].iter().take_while(|e| e.0 == key)
+                .filter(|e| e.2 - e.1 == b - a && !used[e.1..e.2].iter().any(|u| *u))
+                .find_map(|e| moved_layer(&old.instances[e.1..e.2], &new.instances[a..b], dy, edges).map(|w| (e.1, w)))
+            else { continue };
+            for (k, how) in ways.into_iter().enumerate() {
+                used[from + k] = true;
+                taken[a + k] = true;
+                pairs.push(((from + k) as u32, (a + k) as u32, how, a as u32));
+            }
+        }
+    };
+    match_layers(&mut pairs, &mut used, &mut taken, None);
     // The viewport: the clip most content that moved under a kept clip has.
     let mut clips: Vec<[u32; 4]> = pairs.iter().filter(|p| p.2 == Pair::Moved(false))
         .map(|p| bytemuck::cast(new.instances[p.1 as usize].clip)).collect();
@@ -217,25 +324,71 @@ pub(super) fn scrolled(old: &Painted, new: &Painted, size: (u32, u32), out: &mut
     }
     if most == 0 { return None; }
     let viewport: [f32; 4] = bytemuck::cast(viewport);
+    // What is left: content placed a rounding step off, and content the viewport's edge cuts
+    // (a code block half scrolled out), its clip cut where the edge was, or is: alike between
+    // the edges, where pixels can move.
+    let edges = [viewport[0], viewport[1].max(viewport[1] + dy), viewport[2], viewport[3].min(viewport[3] + dy)];
+    let mut loose: Vec<(u64, u32)> = (0..old.instances.len())
+        .filter(|&i| !used[i] && old.scopes[i] == NONE && movable(&old.instances[i]))
+        .map(|i| (hash_words(&canon(&old.instances[i], 0.0, false, true)), i as u32)).collect();
+    loose.sort_unstable();
+    for j in 0..new.instances.len() {
+        let n = &new.instances[j];
+        if taken[j] || new.scopes[j] != NONE || !movable(n) { continue; }
+        let key = hash_words(&canon(n, 0.0, false, true));
+        let at = loose.partition_point(|e| e.0 < key);
+        if let Some((i, how)) = loose[at..].iter().take_while(|e| e.0 == key).map(|e| e.1 as usize)
+            .filter(|&i| !used[i]).find_map(|i| moved_near(&old.instances[i], n, dy, edges).map(|how| (i, how))) {
+            used[i] = true;
+            taken[j] = true;
+            pairs.push((i as u32, j as u32, how, NONE));
+        }
+    }
+    match_layers(&mut pairs, &mut used, &mut taken, Some(edges));
+    pairs.sort_unstable_by_key(|p| p.1);
+    // Pairs out of their old order draw differently where they overlap.
+    let order: Vec<(u32, u32)> = pairs.iter().map(|p| (p.0, p.1)).collect();
+    for (p, kept) in pairs.iter_mut().zip(increasing(&order)) {
+        if !kept { p.2 = Pair::None; }
+    }
     // Moved content elsewhere (another viewport, a clip reaching out of this one) is redrawn.
+    for p in &mut pairs {
+        if !p.2.moved() { continue };
+        let n = &new.instances[p.1 as usize];
+        if n.params[1] == KIND_LAYER_END { continue; }
+        let c = n.clip;
+        let inside = if p.2 == Pair::Moved(false) {
+            c == viewport && radius(n).is_finite()
+        } else {
+            c[0] >= viewport[0] && c[1] >= viewport[1] && c[2] <= viewport[2] && c[3] <= viewport[3] && radius(n).is_finite()
+        };
+        if !inside { p.2 = Pair::None; }
+    }
+    // A layer moves whole or not at all.
+    let mut broken: Vec<u32> = pairs.iter().filter(|p| p.3 != NONE && !p.2.moved()).map(|p| p.3).collect();
+    broken.sort_unstable();
+    broken.dedup();
+    for p in &mut pairs {
+        if p.3 != NONE && broken.binary_search(&p.3).is_ok() { p.2 = Pair::None; }
+    }
+    // Content clipped by the viewport itself keeps its faded edges and rounded corners still; a
+    // clip that moved with its content takes its own along, but one the edge cut has its
+    // rounded corners where it was cut.
     let mut shrink = [0.0f32; 4];
     let mut count = 0;
-    for p in &mut pairs {
-        let Pair::Moved(clip_moved) = p.2 else { continue };
+    for p in &pairs {
+        if !p.2.moved() { continue; }
+        count += 1;
         let n = &new.instances[p.1 as usize];
-        let c = n.clip;
-        let inside = if clip_moved {
-            c[0] >= viewport[0] && c[1] >= viewport[1] && c[2] <= viewport[2] && c[3] <= viewport[3]
-        } else {
-            c == viewport
-        };
-        // Continuous corners bend in further than circular ones of the same radius.
-        let radius = unpack_clip_radii(n.fade[3]).iter().fold(0.0f32, |m, r| m.max(r.abs() * 1.6));
-        if !inside || !radius.is_finite() { p.2 = Pair::None; continue }
+        let radius = radius(n).ceil() + 1.0;
+        if p.2 == Pair::Cut {
+            shrink[1] = shrink[1].max(radius);
+            shrink[3] = shrink[3].max(radius);
+        }
+        if p.2 != Pair::Moved(false) { continue; }
         let (widths, _) = unpack_fade(n.fade);
         let widths = if n.fade[0] == 0 && n.fade[1] == 0 { [0.0; 4] } else { widths.map(|w| w.abs().ceil() + 1.0) };
-        shrink = [shrink[0].max(widths[0]), shrink[1].max(widths[1].max(radius.ceil() + 1.0)), shrink[2].max(widths[2]), shrink[3].max(widths[3].max(radius.ceil() + 1.0))];
-        count += 1;
+        shrink = [shrink[0].max(widths[0]), shrink[1].max(widths[1].max(radius)), shrink[2].max(widths[2]), shrink[3].max(widths[3].max(radius))];
     }
     if count < MIN_MOVED { return None; }
     // Where pixels can move to: inside the viewport's fully covered pixels, clear of its faded
@@ -254,7 +407,7 @@ pub(super) fn scrolled(old: &Painted, new: &Painted, size: (u32, u32), out: &mut
     let mut paired = vec![Pair::None; old.instances.len()];
     for p in &pairs { paired[p.0 as usize] = p.2; }
     for (i, how) in paired.iter().enumerate() {
-        if matches!(how, Pair::Moved(_)) { continue; }
+        if how.moved() { continue; }
         let Some(r) = old.reach(i, size) else { continue };
         // Gone or changed: inside the viewport, the move and the strips cover what it drew.
         let within = r[0] >= outer[0] && r[1] >= outer[1] && r[2] <= outer[2] && r[3] <= outer[3];
@@ -269,7 +422,7 @@ pub(super) fn scrolled(old: &Painted, new: &Painted, size: (u32, u32), out: &mut
     for (j, how) in paired.iter().enumerate() {
         let Some(r) = new.reach(j, size) else { continue };
         match how {
-            Pair::Moved(_) => {}
+            Pair::Moved(_) | Pair::Cut => {}
             Pair::None => out.push(r),
             // It stays, but the move covered it.
             Pair::Same => {

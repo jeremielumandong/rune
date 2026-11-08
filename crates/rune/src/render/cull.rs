@@ -1,19 +1,22 @@
 //! Fewer rasterized pixels for software adapters.
 //!
 //! On WARP or lavapipe every pixel a quad covers runs the uber shader on the CPU, whether it
-//! shows or not. Two kinds of pixel draw nothing, and [`cull`] keeps the shader off them
+//! shows or not. Three kinds of pixel draw nothing, and [`cull`] keeps the shader off them
 //! without changing any pixel the frame draws:
 //!
 //! - Pixels outside a quad's clip: `base_vs` rasterizes the whole quad and `fs` clips per pixel.
 //!   A plain or shadow quad (`KIND_RECT`, `KIND_SHADOW` without a hole) whose clip cuts it
 //!   draws as one band (`runtime/paint/bands.rs`: `uv` = `[x0, y0, -x1, y1]` relative to its
 //!   rect) of the clip's pixels, which shades exactly what the whole quad did there.
-//! - A flat opaque fill drawn over pixels that already are its colour: an app's nested panels
-//!   often paint the same background three or four deep. A square, opaque, borderless,
-//!   unfaded fill whose pixels all lie where an earlier such fill of the same colour fully
-//!   covered them, with nothing drawn over those pixels since, draws as an empty band.
+//! - Pixels a later opaque fill paints over (`hidden`): a window's background under its
+//!   sidebar and panels, a panel under the cards on it.
+//! - Pixels that already are a fill's colour (`same_colour`): an app's nested panels often
+//!   paint the same background three or four deep, and a bordered card the colour of the
+//!   panel under it changes only its border and corners.
 //!
-//! The instance count and order stay, so batches, layers and effect slots keep their indices.
+//! A quad partly culled draws what is left as one band, or, when the caller allows it, as up
+//! to `MAX_BANDS` bands, one instance each. Without that the instance count and order stay, so
+//! batches, layers and effect slots keep their indices.
 use super::*;
 
 /// The flat regions tracked at once; the smallest go first.
@@ -80,30 +83,108 @@ fn touched(i: &Instance, size: (u32, u32)) -> Option<[f32; 4]> {
 }
 
 /// Copies `instances` into `out`, with the pixels they cannot change kept from the shader.
-pub(crate) fn cull(instances: &[Instance], size: (u32, u32), out: &mut Vec<Instance>) {
+/// With `split`, a quad whose pixels left to draw are not one rectangle draws as several
+/// bands, one instance each, so the count changes: only for a frame nothing else addresses
+/// by instance index (native surfaces, GPU springs).
+pub(crate) fn cull(instances: &[Instance], size: (u32, u32), out: &mut Vec<Instance>, split: bool) {
+    let mut keep: Vec<Keep> = vec![Keep::Whole; instances.len()];
+    hidden(instances, size, &mut keep, split);
+    same_colour(instances, size, &mut keep, split);
     out.clear();
-    out.extend_from_slice(instances);
-    hidden(out, size);
-    same_colour(out, size);
+    out.reserve(instances.len());
+    for (i, k) in instances.iter().zip(keep) {
+        match k {
+            Keep::Whole => {
+                let mut i = *i;
+                band(&mut i, size);
+                out.push(i);
+            }
+            Keep::Bands(pieces) if pieces.is_empty() => out.push(Instance { uv: EMPTY, ..*i }),
+            Keep::Bands(pieces) => for p in pieces {
+                let [x, y, ..] = i.rect;
+                out.push(Instance { uv: [p[0] - x, p[1] - y, -(p[2] - x), p[3] - y], ..*i });
+            },
+        }
+    }
 }
 
-/// Quads every pixel of which a later opaque fill covers: an empty band. Walking back from the
-/// top of the painter order, it keeps the rectangles later fills paint over, joining those that
-/// line up (a toolbar over a panel), and skips layers, whose contents and composites it leaves
-/// be. A frame with an effect slot or a backdrop blur, which read what is under them, is left
-/// whole.
-fn hidden(out: &mut [Instance], size: (u32, u32)) {
-    if out.iter().any(|i| i.params[1] == KIND_EFFECT || i.params[1] == KIND_BACKDROP_BLUR) { return; }
+/// What of a quad still draws.
+#[derive(Clone, PartialEq)]
+enum Keep {
+    /// All of it (cut to its clip by `band`).
+    Whole,
+    /// Only these whole-pixel rectangles, each a band (`runtime/paint/bands.rs`); none draws
+    /// nothing.
+    Bands(Vec<[f32; 4]>),
+}
+
+/// The most bands one quad splits into.
+const MAX_BANDS: usize = 12;
+/// A quad bands only when that saves this many pixels or more, and a quarter of its own for
+/// one band or `BAND_SAVED` a band for more.
+const MIN_SAVED: f32 = 4096.0;
+const BAND_SAVED: f32 = 1024.0;
+
+fn area(e: &[f32; 4]) -> f32 { (e[2] - e[0]).max(0.0) * (e[3] - e[1]).max(0.0) }
+
+/// `pieces` without `cut`, as at most four rectangles each.
+fn subtract(pieces: &[[f32; 4]], cut: [f32; 4], out: &mut Vec<[f32; 4]>) {
+    out.clear();
+    for &p in pieces {
+        if !overlaps(p, cut) { out.push(p); continue; }
+        let (y0, y1) = (p[1].max(cut[1]), p[3].min(cut[3]));
+        for piece in [[p[0], p[1], p[2], cut[1]], [p[0], cut[3], p[2], p[3]], [p[0], y0, cut[0], y1], [cut[2], y0, p[2], y1]] {
+            if piece[2] > piece[0] && piece[3] > piece[1] { out.push(piece); }
+        }
+    }
+}
+
+/// What a plain quad (`reach`, its `touched` pixels) still draws once `skip` is left out, when
+/// that is worth it: none at all, one band, or with `split` up to `MAX_BANDS`. The biggest
+/// rectangles go first, and one that would make too many bands stays drawn. Its bands must end
+/// right of its rect's origin to carry the band mark.
+fn without(i: &Instance, reach: [f32; 4], skip: &[[f32; 4]], keep: &Keep, split: bool) -> Option<Keep> {
+    if !(i.params[1] == KIND_RECT || i.params[1] == KIND_SHADOW) || i.uv != [0.0; 4] { return None; }
+    let mut pieces = match keep { Keep::Whole => vec![reach], Keep::Bands(p) => p.clone() };
+    let before: f32 = pieces.iter().map(area).sum();
+    let most = if split { MAX_BANDS } else { 1 };
+    let mut cuts: Vec<[f32; 4]> = skip.iter().copied().filter(|c| overlaps(reach, *c)).collect();
+    cuts.sort_unstable_by(|a, b| area(b).total_cmp(&area(a)));
+    let mut next = Vec::new();
+    for cut in cuts {
+        if !pieces.iter().any(|p| overlaps(*p, cut)) { continue; }
+        subtract(&pieces, cut, &mut next);
+        if next.len() <= most { std::mem::swap(&mut pieces, &mut next); }
+    }
+    let after: f32 = pieces.iter().map(area).sum();
+    let saved = before - after;
+    // One band must save a quarter of the quad; more must each save `BAND_SAVED`.
+    let worth = if pieces.len() > 1 { saved >= BAND_SAVED * pieces.len() as f32 } else { saved * 4.0 >= before };
+    if saved < MIN_SAVED.min(before) || !worth { return None; }
+    if pieces.iter().any(|p| p[2] <= i.rect[0]) { return None; }
+    Some(Keep::Bands(pieces))
+}
+
+/// Quads every pixel of which a later opaque fill covers draw nothing; with fills covering
+/// part of a quad, it draws what they leave (`without`). Walking back from the top of the
+/// painter order, it keeps the rectangles later fills paint over, joining those that line up
+/// (a toolbar over a panel), and skips layers, whose contents and composites it leaves be. A
+/// frame with an effect slot or a backdrop blur, which read what is under them, is left whole.
+fn hidden(instances: &[Instance], size: (u32, u32), keep: &mut [Keep], split: bool) {
+    if instances.iter().any(|i| i.params[1] == KIND_EFFECT || i.params[1] == KIND_BACKDROP_BLUR) { return; }
     let mut covered: Vec<[f32; 4]> = Vec::new();
     let mut depth = 0u32;
-    for i in out.iter_mut().rev() {
+    for (at, i) in instances.iter().enumerate().rev() {
         let kind = i.params[1];
         if kind == KIND_LAYER_END { depth += 1; continue; }
         if kind == KIND_LAYER { depth = depth.saturating_sub(1); continue; }
         if depth > 0 || i.uv == EMPTY { continue; }
-        if let Some(reach) = touched(i, size) && covered.iter().any(|c| inside(reach, *c)) {
-            i.uv = EMPTY;
-            continue;
+        if let Some(reach) = touched(i, size) {
+            if covered.iter().any(|c| inside(reach, *c)) {
+                keep[at] = Keep::Bands(Vec::new());
+                continue;
+            }
+            if let Some(k) = without(i, reach, &covered, &keep[at], split) { keep[at] = k; }
         }
         if !opaque(i) { continue; }
         for mut e in painted(i, size) {
@@ -125,23 +206,22 @@ fn hidden(out: &mut [Instance], size: (u32, u32)) {
             if covered.iter().all(|c| !inside(e, *c)) { covered.push(e); }
         }
         if covered.len() > MAX_REGIONS {
-            let area = |e: &[f32; 4]| (e[2] - e[0]) * (e[3] - e[1]);
             covered.sort_unstable_by(|a, b| area(b).total_cmp(&area(a)));
             covered.truncate(MAX_REGIONS);
         }
     }
 }
 
-/// Flat fills drawn over pixels that already are their colour: an empty band. Quads `hidden`
-/// emptied draw nothing and are passed over.
-fn same_colour(out: &mut [Instance], size: (u32, u32)) {
+/// Flat fills drawn over pixels that already are their colour draw nothing; an opaque fill
+/// (a bordered or rounded card) over a region of its colour draws what it changes there: its
+/// border and corners (`without`). Quads `hidden` emptied draw nothing and are passed over.
+fn same_colour(instances: &[Instance], size: (u32, u32), keep: &mut [Keep], split: bool) {
     // Rectangles of window pixels known to hold one colour at this point of the painter order.
     let mut regions: Vec<([f32; 4], [f32; 4])> = Vec::new();
     let mut depth = 0u32;
-    for i in out.iter_mut() {
-        if i.uv == EMPTY { continue; }
+    for (at, i) in instances.iter().enumerate() {
+        if i.uv == EMPTY || keep[at] == Keep::Bands(Vec::new()) { continue; }
         let kind = i.params[1];
-        let reach = touched(i, size);
         if kind == KIND_LAYER {
             // Its contents may draw straight into the window (`draw_layer_range`) or composite
             // there at its end: what it covers holds no known colour from here on.
@@ -155,11 +235,25 @@ fn same_colour(out: &mut [Instance], size: (u32, u32)) {
             continue;
         }
         // Clipped away: an empty band.
-        let Some(reach) = reach else { band(i, size); continue };
-        if depth == 0 && flat(i) && regions.iter().any(|r| r.1 == i.fill && inside(reach, r.0)) {
-            // Its pixels already are its colour: an empty band.
-            i.uv = EMPTY;
-            continue;
+        let Some(reach) = touched(i, size) else { keep[at] = Keep::Bands(Vec::new()); continue };
+        // What `hidden` leaves of it: where it paints its colour, skipped here or not.
+        let shown = match &keep[at] { Keep::Whole => vec![reach], Keep::Bands(p) => p.clone() };
+        if depth == 0 && opaque(i) {
+            if flat(i) && regions.iter().any(|r| r.1 == i.fill && inside(reach, r.0)) {
+                // Its pixels already are its colour.
+                keep[at] = Keep::Bands(Vec::new());
+                continue;
+            }
+            // Where it paints just its colour over that colour.
+            let mut skip = Vec::new();
+            for e in painted(i, size) {
+                for r in regions.iter().filter(|r| r.1 == i.fill) {
+                    let c = [e[0].max(r.0[0]), e[1].max(r.0[1]), e[2].min(r.0[2]), e[3].min(r.0[3])];
+                    if c[2] > c[0] && c[3] > c[1] { skip.push(c); }
+                }
+            }
+            skip.sort_unstable_by(|a, b| area(b).total_cmp(&area(a)));
+            if let Some(k) = without(i, reach, &skip, &keep[at], split) { keep[at] = k; }
         }
         if regions.iter().any(|r| overlaps(r.0, reach)) {
             let mut kept = Vec::with_capacity(regions.len() + 4);
@@ -175,16 +269,19 @@ fn same_colour(out: &mut [Instance], size: (u32, u32)) {
             regions = kept;
         }
         if depth == 0 && opaque(i) {
+            // Not where `hidden` took it off: a later fill paints there, and what is under
+            // that is not this quad's colour.
             for e in painted(i, size) {
-                if e[2] > e[0] && e[3] > e[1] { regions.push((e, i.fill)); }
+                for d in &shown {
+                    let c = [e[0].max(d[0]), e[1].max(d[1]), e[2].min(d[2]), e[3].min(d[3])];
+                    if c[2] > c[0] && c[3] > c[1] { regions.push((c, i.fill)); }
+                }
             }
         }
         if regions.len() > MAX_REGIONS {
-            let area = |e: &[f32; 4]| (e[2] - e[0]) * (e[3] - e[1]);
             regions.sort_unstable_by(|a, b| area(&b.0).total_cmp(&area(&a.0)));
             regions.truncate(MAX_REGIONS);
         }
-        band(i, size);
     }
 }
 

@@ -267,7 +267,7 @@ impl<S: 'static> Host<S> {
         // Low power: the instances with the pixels they can't change kept from the shader
         // (`render/cull.rs`).
         let culled = crate::low_power::low_power_rendering() && self.comp.is_none();
-        if culled { crate::render::cull::cull(&rt.instances, size, &mut l.culled); }
+        if culled { crate::render::cull::cull(&rt.instances, size, &mut l.culled, rt.surfaces.is_empty()); }
         let instances = if culled { &l.culled[..] } else { &rt.instances[..] };
         let tracked = (crate::low_power::low_power_rendering() && self.comp.is_none() && l.alpha.is_none() && !rt.transparent
             && rt.surfaces.is_empty() && rt.materials.is_empty() && frame.texture.usage().contains(wgpu::TextureUsages::COPY_DST))
@@ -276,7 +276,7 @@ impl<S: 'static> Host<S> {
                 let around = crate::render::damage::Surroundings { size, clear: rt.clear_color(), srgb: rt.srgb_blend(),
                     scale: rt.env.scale, atlas_resets: rt.text.atlas.resets };
                 let texels = crate::render::damage::Texels::of(&rt.images);
-                (around, l.retained.damage(instances, around, &texels))
+                (around, l.retained.damage(&rt.instances, instances, around, &texels))
             });
         renderer.upload_images(&gpu.device, &gpu.queue, &mut rt.images);
         renderer.prepare_surfaces(&gpu.device, &gpu.queue, &rt.surfaces, (l.config.width, l.config.height));

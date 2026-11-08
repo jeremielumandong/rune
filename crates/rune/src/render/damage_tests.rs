@@ -150,6 +150,14 @@ fn rows_view(s: &Rows, _: &mut Cx<Rows>) -> El {
         let bg = if s.hovered == Some(n) { Color { r: 0.3, g: 0.3, b: 0.5, a: 1.0 } } else { Color { r: 0.15, g: 0.15, b: 0.2, a: 1.0 } };
         list.child(row().key(format!("row {n}")).padding(4.0).radius(4.0).fill(bg).child(text(name.clone()).color(Color::WHITE)))
     });
+    // Below the rows: a card taller than the viewport, which its edges cut as it scrolls, and
+    // a table in a rounded clip, which draws through a layer while an edge cuts it.
+    let card = el().key("tall").w(180.0).h(190.0).radius(6.0).border(1.0, Color { r: 0.4, g: 0.4, b: 0.5, a: 1.0 })
+        .fill(Color { r: 0.12, g: 0.12, b: 0.16, a: 1.0 });
+    let table = (0..4).fold(col().key("table").w(180.0).clip_rounded(6.0).fill(Color { r: 0.2, g: 0.15, b: 0.15, a: 1.0 }), |t, n| {
+        t.child(row().key(format!("cell {n}")).padding(3.0).child(text(format!("Cell {n} of the table")).color(Color::WHITE)))
+    });
+    let list = list.child(card).child(table);
     let viewport = col().key("scroll").size(220.0, 150.0).scroll(ScrollSpec { stick_bottom: false }).child(list);
     el().size(240.0, 160.0).fill(Color { r: 0.05, g: 0.05, b: 0.08, a: 1.0 })
         .child(viewport)
@@ -221,6 +229,8 @@ fn a_damage_tracked_frame_draws_what_a_full_frame_draws() {
         ("scrolled on more", wheel(-7.0)),
         ("scrolled back", wheel(7.0)),
     ];
+    // On through the tall card and the table, by whole and fractional device pixels.
+    let steps = steps.into_iter().chain((0..14).map(|n| -> (&str, Step) { ("scrolled far", wheel(if n % 3 == 2 { -20.25 } else { -23.0 })) }));
     let mut redrawn = Vec::new();
     for (label, step) in steps {
         for r in [&mut whole, &mut rt] {
@@ -232,10 +242,14 @@ fn a_damage_tracked_frame_draws_what_a_full_frame_draws() {
         let around = Surroundings { size, clear, srgb: false, scale, atlas_resets: rt.text.atlas.resets };
         retained.fit(&gpu.device, FORMAT, FORMAT, size);
         let texels = Texels::of(&rt.images);
-        let damage = retained.damage(&rt.instances, around, &texels);
+        // Both draw what `render/cull.rs` leaves, as a low-power window does; the damage reads
+        // the instances as built.
+        let mut culled = Vec::new();
+        super::super::cull::cull(&rt.instances, size, &mut culled, true);
+        let damage = retained.damage(&rt.instances, &culled, around, &texels);
         let shift = retained.shift;
-        full.prepare(&gpu.device, &gpu.queue, &mut whole.text.atlas, &whole.instances, size);
-        partial.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, size);
+        full.prepare(&gpu.device, &gpu.queue, &mut whole.text.atlas, &culled, size);
+        partial.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &culled, size);
         assert!(partial.damage_tracking_fits());
         let expected_target = target(&gpu, size);
         let got_target = target(&gpu, size);
@@ -270,6 +284,11 @@ fn a_damage_tracked_frame_draws_what_a_full_frame_draws() {
         // The strips, the overlay circle the move drags and the rows the pointer now hovers.
         assert!(share(step) < 65, "{step}: {redrawn:?}");
     }
+    // Scrolling through the tall card and the table moves them: the strips, the circle and
+    // the hovered rows, and the table once as an edge starts or stops cutting it (it then
+    // draws through a layer).
+    let far: Vec<u64> = redrawn.iter().filter(|(l, _)| *l == "scrolled far").map(|e| e.1).collect();
+    assert!(far.iter().filter(|s| **s < 40).count() >= far.len() - 3, "{far:?}");
 }
 
 #[test]
@@ -290,8 +309,13 @@ fn culled_quads_draw_what_whole_quads_draw() {
         Instance { clip: [100.0, 0.0, 300.0, 320.0], ..quad(0.0, 290.0, 480.0, 20.0, [0.3, 0.6, 0.2, 1.0]) },
     ];
     frame.extend_from_slice(&rt.instances);
+    // A bordered card the colour of the panels under it, a dot on it, and a panel over part
+    // of everything.
+    frame.push(Instance { radii: [10.0; 4], border: [0.4, 0.4, 0.5, 1.0], params: [1.5, KIND_RECT, 0.0, 0.0], ..quad(250.0, 30.0, 200.0, 250.0, bg) });
+    frame.push(quad(300.0, 100.0, 60.0, 60.0, [0.9, 0.9, 0.2, 1.0]));
+    frame.push(quad(0.0, 200.0, 200.0, 120.0, [0.2, 0.1, 0.1, 1.0]));
     let mut out = Vec::new();
-    super::super::cull::cull(&frame, size, &mut out);
+    super::super::cull::cull(&frame, size, &mut out, false);
     assert_eq!(out[1].uv, [0.0, 0.0, -1.0, 0.0], "{:?}", out[1].uv);
     assert_eq!(out[2].uv, [0.0, 0.0, -1.0, 0.0]);
     assert!(out[3].uv[2] < 0.0, "banded to its clip");
@@ -305,7 +329,21 @@ fn culled_quads_draw_what_whole_quads_draw() {
         renderer.submit(&gpu.queue, enc);
         read(&gpu, &texture)
     };
-    let (whole, culled) = (draw(&frame), draw(&out));
-    let worst = whole.iter().zip(&culled).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
-    assert!(worst <= 1, "the same pixels, to blending's rounding: off by {worst}");
+    let mut split = Vec::new();
+    super::super::cull::cull(&frame, size, &mut split, true);
+    assert!(split.len() > frame.len(), "quads split into bands");
+    let (whole, culled, split) = (draw(&frame), draw(&out), draw(&split));
+    for (what, got) in [("culled", &culled), ("split", &split)] {
+        let worst = whole.iter().zip(got).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+        assert!(worst <= 1, "{what}: the same pixels, to blending's rounding: off by {worst}");
+    }
+    // A panel the window's colour over half of it: the window's fill is left out there, so the
+    // panel still draws.
+    let frame = [quad(0.0, 0.0, 480.0, 320.0, bg), quad(240.0, 0.0, 240.0, 320.0, bg)];
+    let whole = draw(&frame);
+    for split in [false, true] {
+        let mut out = Vec::new();
+        super::super::cull::cull(&frame, size, &mut out, split);
+        assert!(whole == draw(&out), "split {split}: the same pixels");
+    }
 }

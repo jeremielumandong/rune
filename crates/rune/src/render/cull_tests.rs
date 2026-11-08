@@ -9,7 +9,7 @@ fn quad(x: f32, y: f32, w: f32, h: f32, fill: [f32; 4]) -> Instance {
 
 fn culled(frame: &[Instance]) -> Vec<Instance> {
     let mut out = Vec::new();
-    cull(frame, SIZE, &mut out);
+    cull(frame, SIZE, &mut out, false);
     assert_eq!(out.len(), frame.len(), "the count and order stay");
     out
 }
@@ -28,7 +28,8 @@ fn a_panel_over_something_else_or_another_colour_still_draws() {
     // Partly outside the panel, so it still shows.
     let between = quad(15.0, 5.0, 20.0, 20.0, [1.0; 4]);
     let frame = [quad(0.0, 0.0, 200.0, 100.0, BG), between, quad(20.0, 10.0, 100.0, 50.0, BG)];
-    assert_eq!(culled(&frame)[2].uv, frame[2].uv, "a quad between them changed some of its pixels");
+    // A quad between them changed some of its pixels: it draws only there, one band.
+    assert_eq!(culled(&frame)[2].uv, [0.0, 0.0, -15.0, 15.0]);
     // Away from what came between, it is still covered.
     let frame = [quad(0.0, 0.0, 200.0, 100.0, BG), between, quad(60.0, 10.0, 100.0, 50.0, BG)];
     assert_eq!(culled(&frame)[2].uv, EMPTY);
@@ -78,4 +79,60 @@ fn a_quad_later_opaque_fills_cover_draws_nothing() {
     let layer = Instance::begin_layer([0.0, 0.0, 200.0, 100.0], NO_CLIP, LayerSpec { opacity: 0.5, ..Default::default() });
     let out = culled(&[card, layer, quad(0.0, 0.0, 200.0, 100.0, [0.1, 0.1, 0.1, 1.0]), Instance::end_layer()]);
     assert_eq!(out[0].uv, card.uv);
+}
+
+/// The pixels the bands of quad `of` (found by rect and fill) rasterize.
+fn banded_area(out: &[Instance], of: &Instance) -> f32 {
+    out.iter().filter(|i| i.rect == of.rect && i.fill == of.fill).map(|i| {
+        if i.uv == EMPTY { 0.0 } else if i.uv[2] < 0.0 { (-i.uv[2] - i.uv[0]) * (i.uv[3] - i.uv[1]) } else { i.rect[2] * i.rect[3] }
+    }).sum()
+}
+
+#[test]
+fn a_card_over_its_own_colour_draws_its_inside_once() {
+    let card = Instance { radii: [8.0; 4], border: [0.3, 0.3, 0.3, 1.0], params: [1.0, KIND_RECT, 0.0, 0.0], ..quad(20.0, 10.0, 160.0, 80.0, BG) };
+    let dot = quad(60.0, 40.0, 10.0, 10.0, [1.0; 4]);
+    let frame = [quad(0.0, 0.0, 200.0, 100.0, BG), card, dot];
+    let mut out = Vec::new();
+    cull(&frame, SIZE, &mut out, true);
+    // The screen under its inside or its inside over the screen: one of them, not both.
+    let drawn = banded_area(&out, &frame[0]) + banded_area(&out, &card);
+    assert!(drawn < 200.0 * 100.0 + 0.25 * 160.0 * 80.0, "{drawn}");
+    assert!(out.len() <= frame.len() + 2 * MAX_BANDS);
+    assert_eq!(out.last().unwrap().uv, dot.uv, "what draws over it still draws");
+    // One instance a quad unless asked, and the ring is no one band.
+    cull(&frame, SIZE, &mut out, false);
+    assert_eq!(out.len(), frame.len());
+    assert_eq!(out[1].uv, card.uv);
+}
+
+#[test]
+fn a_quad_later_fills_cover_in_part_draws_the_rest() {
+    let bg = quad(0.0, 0.0, 200.0, 100.0, BG);
+    // A sidebar leaves a strip on the right: one band.
+    let side = quad(0.0, 0.0, 150.0, 100.0, [0.1, 0.1, 0.1, 1.0]);
+    let mut out = Vec::new();
+    cull(&[bg, side], SIZE, &mut out, false);
+    assert_eq!(out[0].uv, [150.0, 0.0, -200.0, 100.0]);
+    // A panel in the middle leaves two: two bands, when splitting.
+    let middle = quad(50.0, 0.0, 100.0, 100.0, [0.1, 0.1, 0.1, 1.0]);
+    cull(&[bg, middle], SIZE, &mut out, false);
+    assert_eq!(out[0].uv, bg.uv, "not one band");
+    cull(&[bg, middle], SIZE, &mut out, true);
+    assert_eq!(out.len(), 3);
+    assert_eq!(banded_area(&out, &bg), 100.0 * 100.0);
+}
+
+#[test]
+fn a_panel_of_the_screen_colour_where_the_screen_is_culled_still_draws() {
+    // The screen's fill is left out under a panel of its own colour (`hidden`): what is left
+    // there is not that colour, so the panel must draw.
+    let screen = quad(0.0, 0.0, 200.0, 100.0, BG);
+    let panel = quad(100.0, 0.0, 100.0, 100.0, BG);
+    for split in [false, true] {
+        let mut out = Vec::new();
+        cull(&[screen, panel], SIZE, &mut out, split);
+        assert!(banded_area(&out, &screen) < 200.0 * 100.0, "the screen is cut under the panel");
+        assert_eq!(banded_area(&out, &panel), 100.0 * 100.0, "split {split}");
+    }
 }

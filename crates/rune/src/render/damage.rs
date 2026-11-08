@@ -27,6 +27,9 @@ pub(crate) use scroll::Shift;
 pub(crate) const MAX_RECTS: usize = 4;
 /// A frame whose damage covers more than this share of the window redraws all of it.
 const FULL_SHARE: u64 = 70;
+/// A frame whose plain damage covers more than one in this many of the window's pixels tries
+/// a scroll move.
+const SCROLL_SHARE: u64 = 32;
 /// Pixels added around each damaged quad, for rounding and antialiased edges.
 const MARGIN: f32 = 2.0;
 
@@ -303,10 +306,15 @@ impl Retained {
     /// The kept frame's view, once `fit`.
     pub(crate) fn view(&self) -> Option<&wgpu::TextureView> { self.target.as_ref().map(|(_, v)| v) }
 
-    /// What this frame must redraw, comparing `instances` with the kept frame's. Call before
-    /// `Renderer::prepare`, which takes the atlases' written rows.
-    pub(crate) fn damage(&mut self, instances: &[Instance], around: Surroundings, texels: &Texels) -> Damage {
+    /// What this frame must redraw, comparing `instances` with the kept frame's. `drawn` are
+    /// the instances the frame draws: `instances` as `render/cull.rs` culls them (the same
+    /// pixels), or `instances` themselves; only their rasterized pixels count. The comparison reads
+    /// the unculled ones: a culled quad's band depends on where its clip cuts it, so a card
+    /// the viewport's edge cuts would change as it scrolls. Call before `Renderer::prepare`,
+    /// which takes the atlases' written rows.
+    pub(crate) fn damage(&mut self, instances: &[Instance], drawn: &[Instance], around: Surroundings, texels: &Texels) -> Damage {
         self.next.fill(instances, around.size);
+        if !std::ptr::eq(instances, drawn) { self.next.quads = drawn.iter().map(|i| rasterized(i, around.size)).sum(); }
         self.shift = None;
         if self.target.is_none() || self.drawn != Some(around) { return Damage::Full; }
         let size = around.size;
@@ -316,22 +324,9 @@ impl Retained {
                 if texels.sampled_by(&self.next.instances[at]) && let Some(e) = self.next.reach(at, size) { sampled.push(e); }
             }
         }
-        let mut boxes = sampled.clone();
-        changed(&self.painted, &self.next, size, &mut boxes);
-        let plain = reduce(&boxes, size);
-        // A big change may be a scroll: try moving the kept pixels.
-        let window = u64::from(size.0) * u64::from(size.1);
-        if plain.area(size) * 4 > window {
-            let mut boxes = sampled;
-            if let Some(shift) = scroll::scrolled(&self.painted, &self.next, size, &mut boxes) {
-                let moved = reduce(&boxes, size);
-                if moved != Damage::Full && moved.area(size) < plain.area(size) {
-                    self.shift = Some(shift);
-                    return moved;
-                }
-            }
-        }
-        plain
+        let (damage, shift) = compare(&self.painted, &self.next, size, sampled);
+        self.shift = shift;
+        damage
     }
 
     /// Moves the kept pixels as `damage` found the frame scrolled, before the frame's damage
@@ -389,6 +384,38 @@ impl Retained {
         let Some((texture, _)) = &self.target else { return };
         encoder.copy_texture_to_texture(texture.as_image_copy(), drawable.as_image_copy(), texture.size());
     }
+}
+
+/// What a frame redraws going from `old` to `new`, past the `sampled` edges, and the move it
+/// makes of the kept pixels, if any.
+fn compare(old: &Painted, new: &Painted, size: (u32, u32), sampled: Vec<[f32; 4]>) -> (Damage, Option<Shift>) {
+    let mut boxes = sampled.clone();
+    changed(old, new, size, &mut boxes);
+    let plain = reduce(&boxes, size);
+    // A change of more than a few rows may be a scroll: try moving the kept pixels. (A
+    // scrolled viewport can be a small share of a big window: a chat beside open panels.)
+    let window = u64::from(size.0) * u64::from(size.1);
+    if plain.area(size) * SCROLL_SHARE > window {
+        let mut boxes = sampled;
+        if let Some(shift) = scroll::scrolled(old, new, size, &mut boxes) {
+            let moved = reduce(&boxes, size);
+            if moved != Damage::Full && moved.area(size) < plain.area(size) {
+                return (moved, Some(shift));
+            }
+        }
+    }
+    (plain, None)
+}
+
+/// The share of a `size` window (device pixels) a damage-tracked frame redraws going from the
+/// instances `old` to `new` (`Runtime::instances`, before culling), and whether it moves the
+/// kept pixels to follow a scroll. For tests of an app's own screens.
+pub fn damage_share(old: &[Instance], new: &[Instance], size: (u32, u32)) -> (f64, bool) {
+    let (mut a, mut b) = (Painted::default(), Painted::default());
+    a.fill(old, size);
+    b.fill(new, size);
+    let (damage, shift) = compare(&a, &b, size, Vec::new());
+    (damage.area(size) as f64 / (f64::from(size.0) * f64::from(size.1)), shift.is_some())
 }
 
 /// Edges of what changed from `old` to `new`, pushed onto `out`.
@@ -451,18 +478,20 @@ fn increasing(pairs: &[(u32, u32)]) -> Vec<bool> {
 }
 
 /// Whole-pixel rectangles covering `boxes` (edges), at most `MAX_RECTS`, or `Full` when they
-/// cover most of the window.
+/// cover most of the window. Two rectangles join when their union costs no more than drawing
+/// both; otherwise they may overlap, as redrawing a rectangle twice draws the same pixels (a
+/// tall card whose corner pokes into a wide strip shades less than their union).
 fn reduce(boxes: &[[f32; 4]], size: (u32, u32)) -> Damage {
     let (w, h) = (size.0 as i64, size.1 as i64);
     let area = |r: &[i64; 4]| (r[2] - r[0]) * (r[3] - r[1]);
     let union = |a: &[i64; 4], b: &[i64; 4]| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])];
-    let touches = |a: &[i64; 4], b: &[i64; 4]| a[0] <= b[2] && b[0] <= a[2] && a[1] <= b[3] && b[1] <= a[3];
+    let cheap = |a: &[i64; 4], b: &[i64; 4]| area(&union(a, b)) <= area(a) + area(b);
     let mut rects: Vec<[i64; 4]> = Vec::new();
     for e in boxes {
         let r = [((e[0] - MARGIN).floor() as i64).max(0), ((e[1] - MARGIN).floor() as i64).max(0),
             ((e[2] + MARGIN).ceil() as i64).min(w), ((e[3] + MARGIN).ceil() as i64).min(h)];
         if r[2] <= r[0] || r[3] <= r[1] { continue; }
-        if let Some(q) = rects.iter_mut().find(|q| touches(q, &r)) {
+        if let Some(q) = rects.iter_mut().find(|q| cheap(q, &r)) {
             *q = union(q, &r);
             continue;
         }
@@ -481,10 +510,10 @@ fn reduce(boxes: &[[f32; 4]], size: (u32, u32)) -> Damage {
             rects[best.1] = merged;
         }
     }
-    // Merging can make rectangles overlap: join those, so no pixel is redrawn twice.
+    // Merging can make more pairs cheap to join.
     let mut i = 0;
     while i < rects.len() {
-        if let Some(j) = (0..rects.len()).find(|&j| j != i && touches(&rects[i], &rects[j])) {
+        if let Some(j) = (0..rects.len()).find(|&j| j != i && cheap(&rects[i], &rects[j])) {
             let merged = union(&rects[i], &rects[j]);
             rects[i.min(j)] = merged;
             rects.swap_remove(i.max(j));
