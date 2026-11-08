@@ -41,7 +41,7 @@ pub mod growth;
 pub mod hot;
 pub mod image;
 pub mod live;
-// frame pacing and effects for software adapters (PARITY-PATCH.md).
+// Frame pacing and effects for software adapters.
 pub mod low_power;
 pub mod memo;
 pub mod motion_gate;

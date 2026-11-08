@@ -514,8 +514,8 @@ impl Gpu {
     }
 
     /// The adapter a window will draw with: `gpu::pick`'s choice for a surface not made yet,
-    /// as `warm_gpu` makes it, honouring `WGPU_ADAPTER_NAME` and `WGPU_POWER_PREF`
-    /// patch). For an app that decides before its first window whether it draws on a software
+    /// as `warm_gpu` makes it, honouring `WGPU_ADAPTER_NAME` and `WGPU_POWER_PREF`.
+    /// For an app that decides before its first window whether it draws on a software
     /// adapter (WARP, lavapipe); `None` when no adapter is found.
     #[cfg(not(any(target_arch = "wasm32", target_vendor = "apple")))]
     pub fn window_adapter_info() -> Option<wgpu::AdapterInfo> {
