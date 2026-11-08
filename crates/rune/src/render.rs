@@ -439,6 +439,10 @@ impl Gpu {
         }
     }
 
+    /// The views a device's DX12 descriptor heap holds (`device_on`): 4 MB at 32 bytes a view.
+    #[cfg(not(target_arch = "wasm32"))]
+    const DESCRIPTOR_VIEWS: u32 = 1 << 17;
+
     #[cfg(not(target_arch = "wasm32"))]
     fn device_on(adapter: &wgpu::Adapter, wanted: wgpu::Features) -> Result<(wgpu::Device, wgpu::Queue), String> {
         let optional_features = wgpu::Features::TIMESTAMP_QUERY | wanted | crate::gpu::backend::free_features(adapter);
@@ -466,6 +470,15 @@ impl Gpu {
                     .using_resolution(adapter_limits.clone())
                     .using_alignment(adapter_limits)
             }
+        };
+        // DX12 makes one shader-visible descriptor heap of `max_non_sampler_bindings` views at
+        // device creation, and `Limits::default` asks for 1,000,000: about 32 MB per device
+        // (32 bytes a view on AMD and NVIDIA), whatever the app binds. Rune's bind groups hold
+        // a few views each and live as long as their atlas pages and layer targets, so
+        // `DESCRIPTOR_VIEWS` is far more than a window uses. Other backends ignore the limit.
+        let required_limits = wgpu::Limits {
+            max_non_sampler_bindings: required_limits.max_non_sampler_bindings.min(Self::DESCRIPTOR_VIEWS),
+            ..required_limits
         };
         pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("rune"),
