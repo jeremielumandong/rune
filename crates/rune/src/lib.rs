@@ -41,6 +41,8 @@ pub mod growth;
 pub mod hot;
 pub mod image;
 pub mod live;
+// frame pacing and effects for software adapters (PARITY-PATCH.md).
+pub mod low_power;
 pub mod memo;
 pub mod motion_gate;
 pub mod native_surface;
@@ -235,6 +237,7 @@ pub use render::prewarm_gpu;
 pub use render::prewarm_gpu_on;
 pub use render::warm_gpu;
 pub use render::warm_gpu_with;
+pub use low_power::{low_power_rendering, set_low_power_rendering, set_software_rendering_effects, software_rendering_effects};
 pub use rune_motion::Anim;
 pub use rune_motion::AnimExt;
 pub use rune_motion::Beat;

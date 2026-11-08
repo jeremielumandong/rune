@@ -57,6 +57,8 @@ impl<S: 'static> Runtime<S> {
         let vp = [0.0, 0.0, self.viewport.0 * s, self.viewport.1 * s];
         let mut glyph_count = 0usize;
         let mut backdrop_blurs = 0usize;
+        // Low-power software rendering leaves out blurred shadows and backdrop blur (low_power.rs).
+        let software = crate::low_power::software_rendering_effects();
         let mut ambient: Option<f32> = None;
         // Retain scope capacity across frames. Records preserve absolute instance indices
         // for images, video insertions, retained springs and compositor list ranges.
@@ -623,7 +625,7 @@ impl<S: 'static> Runtime<S> {
             }
             // A backdrop blur samples what is drawn before it, so it goes ahead of any layer this
             // element opens (a fade still blurs the window) and of its shadows, which skip it.
-            let blur_hole = (n.vis.backdrop_blur > 0.0 && !skip_paint && visible && backdrop_blurs < crate::MAX_BACKDROP_BLURS
+            let blur_hole = (n.vis.backdrop_blur > 0.0 && !software && !skip_paint && visible && backdrop_blurs < crate::MAX_BACKDROP_BLURS
                 && effective_opacity > 0.001 && own * pinh.paint_opacity * n.vis.paint_alpha > 0.001)
                 .then(|| paint_slots::push_backdrop_blur(&mut self.instances, n.vis.backdrop_blur, ([r[0], r[1], w, h], radii, n.vis.continuous_corners),
                     (clip, fade, fade_origin), rounded, sc * s, (own * pinh.paint_opacity * n.vis.paint_alpha).clamp(0.0, 1.0)));
@@ -825,7 +827,7 @@ impl<S: 'static> Runtime<S> {
                 for (k, sh) in n.vis.shadows.iter().chain(stuck_shadows.1).enumerate() {
                     let c = if k >= n.vis.shadows.len() { sh.color.alpha(sh.color.a * stuck_shadows.0) }
                         else if k < P_SHADOWS.len() { self.color(n.id, P_SHADOWS[k], sh.color) } else { sh.color };
-                    if c.a <= 0.0 || sh.inset {
+                    if c.a <= 0.0 || sh.inset || (software && sh.blur > 0.0) {
                         continue;
                     }
                     let sh = &if k < n.vis.shadows.len() { self.shadow_at(n.id, k, sh) } else { *sh };
@@ -1034,7 +1036,7 @@ impl<S: 'static> Runtime<S> {
                     }
                     let c = if k >= n.vis.shadows.len() { sh.color.alpha(sh.color.a * stuck_shadows.0) }
                         else if k < P_SHADOWS.len() { self.color(n.id, P_SHADOWS[k], sh.color) } else { sh.color };
-                    if c.a <= 0.0 {
+                    if c.a <= 0.0 || (software && sh.blur > 0.0) {
                         continue;
                     }
                     let sh = &if k < n.vis.shadows.len() { self.shadow_at(n.id, k, sh) } else { *sh };

@@ -534,3 +534,99 @@ fn a_new_gpus_device_equals_the_old_one_but_its_key_differs() {
     let (old, new) = (crate::render::Renderer::new(&old, format), crate::render::Renderer::new(&new, format));
     assert_ne!(old.device_key(), new.device_key());
 }
+
+#[cfg(not(target_os = "macos"))]
+thread_local! {
+    /// How many times `on_demand_host`'s view ran.
+    static VIEWS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// A resting window as the host draws it on demand: a
+/// focusable button that widens on each press or Enter, in a still panel, with motion off as in
+/// low-power mode.
+#[cfg(not(target_os = "macos"))]
+fn on_demand_host() -> CompHost {
+    fn view(n: &u32, cx: &mut crate::Cx<u32>) -> crate::El {
+        VIEWS.set(VIEWS.get() + 1);
+        cx.reduced_motion(true);
+        let button = crate::el().key("button").size(40.0 + (*n % 2) as f32 * 10.0, 40.0).fill(crate::Color::WHITE).focusable(true)
+            .on_press(|n: &mut u32| *n += 1)
+            .on_key(|n: &mut u32, ev: &crate::KeyEvent, _: &mut Tx| {
+                let hit = ev.key == crate::Key::Enter;
+                if hit { *n += 1; }
+                hit
+            });
+        crate::el().key("panel").size(100.0, 40.0).child(button)
+    }
+    let mut rt = Runtime::new(0u32, view, (100.0, 40.0), crate::Env::default());
+    rt.wall_start = Some(Instant::now());
+    let config = wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format: wgpu::TextureFormat::Bgra8UnormSrgb,
+        width: 100,
+        height: 40,
+        present_mode: wgpu::PresentMode::AutoVsync,
+        desired_maximum_frame_latency: 2,
+        alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+        view_formats: vec![],
+        color_space: Default::default(),
+    };
+    let comp_animates = std::rc::Rc::new(std::cell::Cell::new(false));
+    let mut host = CompHost { rt, presented: None, config, idle: false, comp: None, comp_animates, frames: 0, reports: Default::default() };
+    for _ in 0..3 { host.frame(false); }
+    assert!(host.idle, "the window rests");
+    host.frames = 0;
+    host
+}
+
+/// The frames a window presents for `input`, each as `draw` takes it: built first and presented
+/// only when it changed what's on screen. A frame asks for the next only while not at rest.
+#[cfg(not(target_os = "macos"))]
+fn input_frames(host: &mut CompHost, input: impl FnOnce(&mut Runtime<u32>)) -> u32 {
+    let frames = host.frames;
+    input(&mut host.rt);
+    host.frame(draw::ON_DEMAND);
+    for _ in 0..120 {
+        if host.idle { break; }
+        host.frame(draw::ON_DEMAND);
+    }
+    assert!(host.idle, "the window rests again");
+    host.frames - frames
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_resting_window_presents_only_input_that_changes_the_screen() {
+    let mut host = on_demand_host();
+    assert_eq!(host.rt.wake_deadline(), None, "nothing wakes a window at rest");
+    let enter = crate::KeyEvent { key: crate::Key::Enter, mods: Default::default() };
+    let other = crate::KeyEvent { key: crate::Key::Text("x".into()), mods: Default::default() };
+    assert_eq!(input_frames(&mut host, |rt| rt.pointer_move(80.0, 20.0)), 0, "a move over the still panel");
+    assert_eq!(input_frames(&mut host, |rt| rt.pointer_move(20.0, 20.0)), 0, "onto a button with no hover style");
+    assert_eq!(input_frames(&mut host, |rt| rt.pointer_move(22.0, 21.0)), 0, "across it");
+    assert_eq!(input_frames(&mut host, |rt| { rt.pointer_down(90.0, 20.0); rt.pointer_up(90.0, 20.0); }), 0, "a click on nothing");
+    assert_eq!(input_frames(&mut host, |rt| { rt.pointer_down(20.0, 20.0); rt.pointer_up(20.0, 20.0); }), 1, "a click that widens the button");
+    assert_eq!(host.rt.state, 1);
+    assert_eq!(input_frames(&mut host, |rt| rt.key(other.clone())), 0, "a key nothing takes");
+    let keyed = input_frames(&mut host, |rt| rt.key(enter.clone()));
+    assert_eq!(host.rt.state, 2);
+    assert!((1..=2).contains(&keyed), "a key that narrows it: its frame, and the focus ring's at most ({keyed})");
+    assert_eq!(input_frames(&mut host, |rt| rt.pointer_move(60.0, 10.0)), 0, "no frames after it");
+    assert_eq!(host.rt.wake_deadline(), None, "nor a timer");
+}
+
+/// A move reuses the scene: no view, no layout, no frame. A resize lays the tree out again and
+/// draws once, without running the view.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn moving_a_window_reuses_its_scene_and_a_resize_draws_once() {
+    let mut host = on_demand_host();
+    let (commits, views) = (host.rt.stats.commits, VIEWS.get());
+    assert_eq!(input_frames(&mut host, |rt| { rt.set_window_origin((300.0, 200.0)); }), 0, "a move draws nothing");
+    assert_eq!((host.rt.stats.commits, VIEWS.get()), (commits, views), "and runs no view or layout");
+    host.rt.set_viewport((120.0, 40.0), 1.0);
+    host.config.width = 120;
+    assert_eq!(input_frames(&mut host, |_| {}), 1, "a resize draws once");
+    assert_eq!(host.rt.stats.commits, commits + 1, "one layout");
+    assert_eq!(VIEWS.get(), views, "and no view");
+}

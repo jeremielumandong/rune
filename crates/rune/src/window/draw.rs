@@ -3,12 +3,8 @@
 
 use super::*;
 
-/// How long a Windows window keeps presenting every refresh after its last change. With G-SYNC
-/// or FreeSync in windowed mode the display refreshes when the foreground window presents, so a
-/// hover's lone presents swing the refresh rate, and many panels' brightness with it (Hex #689).
-/// A steady run at the display's rate, then rest, changes the rate once per interaction.
-#[cfg(target_os = "windows")]
-const STEADY: Duration = Duration::from_secs(1);
+/// Every frame builds first and presents only what changed.
+pub(super) const ON_DEMAND: bool = !cfg!(target_os = "macos");
 
 impl<S: 'static> Host<S> {
     /// A shown frame with no drawable. Asking for a redraw here would turn the loop at once, for
@@ -72,6 +68,12 @@ impl<S: 'static> Host<S> {
         // A missed frame's retry, or the timer pacing unpaced motion: input waits for it, and
         // `new_events` runs due timers meanwhile.
         if !resizing && l.backing_off(Instant::now()) { return; }
+        // Low-power mode: a frame asked for before the pace allows waits for it, as a retry does.
+        let started = Instant::now();
+        if !resizing && !hidden && let Some(at) = l.paced_until.filter(|at| *at > started) {
+            l.retry = Some(at);
+            return;
+        }
         // Starting the display link for a window that isn't on screen would wait for a tick that
         // sleeping displays never send, and a running link holds back its timers (`wake_deadline`).
         #[cfg(target_os = "macos")]
@@ -139,7 +141,11 @@ impl<S: 'static> Host<S> {
         { self.rt.native_materials = l.native.materials.native(); }
         // Only a timer woke the resting window: build the frame first, and take no drawable
         // when it draws what's on screen.
-        let quiet = std::mem::take(&mut l.quiet) && !hidden && !live_resize && l.presented.is_some() && self.comp.is_none()
+        // off macOS, whose display link paces input frames, a
+        // frame input or an update asked for does the same, so a mouse move, click or key that
+        // changes nothing on screen presents nothing. Over Remote Desktop and on a software
+        // adapter, presenting each one cost a core.
+        let quiet = (std::mem::take(&mut l.quiet) || ON_DEMAND) && !hidden && !live_resize && l.presented.is_some() && self.comp.is_none()
             && self.trace.is_none() && self.args.trace.is_none() && self.rt.live_visible()
             && self.rt.window_frame.is_none() && self.frame_anim.is_none();
         #[cfg(target_os = "macos")]
@@ -300,6 +306,7 @@ impl<S: 'static> Host<S> {
             l.native.cloak.lift(&l.window);
         }
         let submitted = Instant::now();
+        l.paced_until = (!hidden && crate::low_power::low_power_rendering()).then(|| crate::low_power::next_frame_at(started, submitted));
         self.meter.presented();
         #[cfg(target_os = "macos")]
         if let Some(pacing) = &mut l.native.pacing { pacing.presented(submitted); }
@@ -327,24 +334,11 @@ impl<S: 'static> Host<S> {
         // link going; without one its timer waits a frame in `wake_deadline`.
         let next_tick = l.next_tick(now).filter(|_| !hidden);
         let rests = !hidden && !(self.trace.is_some() && self.args.frames.is_some());
-        #[cfg(target_os = "windows")]
-        let steady = {
-            // A frame the hold alone asked for changes nothing unless it draws something new.
-            let held = std::mem::take(&mut l.steady_frame);
-            let changed = !held || (self.comp.is_none() && !l.presented.as_ref().is_some_and(|p| p.same(rt, &l.config)));
-            if changed { l.steady_until = Some(now + STEADY); }
-            !hidden && l.steady_until.is_some_and(|until| now < until)
-        };
         self.idle = Presented::settle(&mut l.presented, rt, &l.config, animating || self.frame_anim.is_some(), next_tick, rests, self.comp.is_some());
         #[cfg(target_os = "macos")]
         if !hidden && let Some(latency) = l.native.launch_drawables.settle(self.idle, now) {
             l.config.desired_maximum_frame_latency = latency;
             l.surface.configure(&gpu.device, &l.config);
-        }
-        #[cfg(target_os = "windows")]
-        if self.idle && steady {
-            l.steady_frame = true;
-            l.window.request_redraw();
         }
         if !hidden && (!self.idle || (self.trace.is_some() && self.args.frames.is_some())) {
             // Without a running display link, macOS hands out drawables faster than the
@@ -352,7 +346,11 @@ impl<S: 'static> Host<S> {
             #[cfg(target_os = "macos")]
             if !l.native.pacing.as_mut().is_some_and(|p| p.start()) { l.retry = Some(now + TIMER_FRAME); }
             #[cfg(not(target_os = "macos"))]
-            l.window.request_redraw();
+            match l.paced_until {
+                // Low-power mode: the retry asks for the frame when the pace allows it.
+                Some(at) => l.retry = Some(at),
+                None => l.window.request_redraw(),
+            }
             self.meter.set_pacing(l.pacing_state(true));
         } else {
             l.stop_pacing();
