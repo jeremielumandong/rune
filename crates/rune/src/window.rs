@@ -582,8 +582,8 @@ pub(crate) fn surface_config(surface: &wgpu::Surface, adapter: &wgpu::Adapter, (
     // backdrops, rune-fx blend modes). On Metal it costs `framebufferOnly`, but without it they
     // quietly fall back.
     config.usage |= caps.usages & wgpu::TextureUsages::COPY_SRC;
-    // Low power copies the kept frame into the drawable (`render/damage.rs`).
-    if crate::low_power::low_power_rendering() { config.usage |= caps.usages & wgpu::TextureUsages::COPY_DST; }
+    // Software rendering copies the kept frame into the drawable (`render/damage.rs`).
+    if crate::software_rendering::software_rendering() { config.usage |= caps.usages & wgpu::TextureUsages::COPY_DST; }
     config.present_mode = wgpu::PresentMode::AutoVsync;
     config.desired_maximum_frame_latency = 2;
     Some((config, crate::render::translucency::mode(surface, adapter)))

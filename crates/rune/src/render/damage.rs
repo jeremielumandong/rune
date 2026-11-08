@@ -1,4 +1,4 @@
-//! Damage-region redraw, for low-power windows.
+//! Damage-region redraw, for software-rendering windows.
 //!
 //! On a software adapter (WARP, lavapipe) every shaded pixel costs CPU, and a frame that changes
 //! a few rows of text still shaded the whole window. Here the window keeps its last frame in a
@@ -361,7 +361,7 @@ impl Retained {
         std::mem::swap(&mut self.painted, &mut self.next);
         self.drawn = Some(around);
         self.last = (damage.area(around.size), u64::from(around.size.0) * u64::from(around.size.1));
-        crate::low_power::count_redrawn(self.last.0, self.last.1, self.painted.quads);
+        crate::software_rendering::count_redrawn(self.last.0, self.last.1, self.painted.quads);
     }
 
     /// Readies the pipeline that fills a damaged rectangle with the clear colour `color`, for

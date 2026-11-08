@@ -242,7 +242,7 @@ fn a_damage_tracked_frame_draws_what_a_full_frame_draws() {
         let around = Surroundings { size, clear, srgb: false, scale, atlas_resets: rt.text.atlas.resets };
         retained.fit(&gpu.device, FORMAT, FORMAT, size);
         let texels = Texels::of(&rt.images);
-        // Both draw what `render/cull.rs` leaves, as a low-power window does; the damage reads
+        // Both draw what `render/cull.rs` leaves, as a software-rendering window does; the damage reads
         // the instances as built.
         let mut culled = Vec::new();
         super::super::cull::cull(&rt.instances, size, &mut culled, true);

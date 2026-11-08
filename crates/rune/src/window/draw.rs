@@ -68,7 +68,7 @@ impl<S: 'static> Host<S> {
         // A missed frame's retry, or the timer pacing unpaced motion: input waits for it, and
         // `new_events` runs due timers meanwhile.
         if !resizing && l.backing_off(Instant::now()) { return; }
-        // Low-power mode: a frame asked for before the pace allows waits for it, as a retry does.
+        // Software-rendering mode: a frame asked for before the pace allows waits for it, as a retry does.
         let started = Instant::now();
         if !resizing && !hidden && let Some(at) = l.paced_until.filter(|at| *at > started) {
             l.retry = Some(at);
@@ -165,9 +165,9 @@ impl<S: 'static> Host<S> {
                 l.stop_pacing();
                 self.meter.set_pacing(l.pacing_state(false));
                 self.frame_reports.unchanged(target);
-                // Low power paces builds as it paces draws: a stream of wakes or events that
-                // change nothing builds at most one frame a pace, not one each (`low_power`).
-                l.paced_until = crate::low_power::pace_after(!hidden, started, Instant::now());
+                // Software rendering paces builds as it paces draws: a stream of wakes or events that
+                // change nothing builds at most one frame a pace, not one each (`software_rendering`).
+                l.paced_until = crate::software_rendering::pace_after(!hidden, started, Instant::now());
                 return;
             }
             Some((animating, dt, now))
@@ -261,15 +261,15 @@ impl<S: 'static> Host<S> {
             format: (target_format != l.config.format).then_some(target_format),
             ..Default::default()
         });
-        // Low power: what changed since the kept frame, before the uploads take the image
+        // Software rendering: what changed since the kept frame, before the uploads take the image
         // atlas's written rows (`render/damage.rs`).
         let size = (l.config.width, l.config.height);
-        // Low power: the instances with the pixels they can't change kept from the shader
+        // Software rendering: the instances with the pixels they can't change kept from the shader
         // (`render/cull.rs`).
-        let culled = crate::low_power::low_power_rendering() && self.comp.is_none();
+        let culled = crate::software_rendering::software_rendering() && self.comp.is_none();
         if culled { crate::render::cull::cull(&rt.instances, size, &mut l.culled, rt.surfaces.is_empty()); }
         let instances = if culled { &l.culled[..] } else { &rt.instances[..] };
-        let tracked = (crate::low_power::low_power_rendering() && self.comp.is_none() && l.alpha.is_none() && !rt.transparent
+        let tracked = (crate::software_rendering::software_rendering() && self.comp.is_none() && l.alpha.is_none() && !rt.transparent
             && rt.surfaces.is_empty() && rt.materials.is_empty() && frame.texture.usage().contains(wgpu::TextureUsages::COPY_DST))
             .then(|| {
                 l.retained.fit(&gpu.device, l.config.format, target_format, size);
@@ -341,7 +341,7 @@ impl<S: 'static> Host<S> {
             l.native.cloak.lift(&l.window);
         }
         let submitted = Instant::now();
-        l.paced_until = crate::low_power::pace_after(!hidden, started, submitted);
+        l.paced_until = crate::software_rendering::pace_after(!hidden, started, submitted);
         self.meter.presented();
         #[cfg(target_os = "macos")]
         if let Some(pacing) = &mut l.native.pacing { pacing.presented(submitted); }
@@ -382,7 +382,7 @@ impl<S: 'static> Host<S> {
             if !l.native.pacing.as_mut().is_some_and(|p| p.start()) { l.retry = Some(now + TIMER_FRAME); }
             #[cfg(not(target_os = "macos"))]
             match l.paced_until {
-                // Low-power mode: the retry asks for the frame when the pace allows it.
+                // Software-rendering mode: the retry asks for the frame when the pace allows it.
                 Some(at) => l.retry = Some(at),
                 None => l.window.request_redraw(),
             }

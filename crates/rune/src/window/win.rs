@@ -35,11 +35,11 @@ pub(super) struct Win {
     pub(super) quiet: bool,
     /// The last frame presented, while the window rests.
     pub(super) presented: Option<Presented>,
-    /// Low-power mode: when the next frame may start (`low_power::next_frame_at`).
+    /// Software-rendering mode: when the next frame may start (`software_rendering::next_frame_at`).
     pub(super) paced_until: Option<Instant>,
-    /// Low-power mode: the last frame, kept to redraw only what changes (`render/damage.rs`).
+    /// Software-rendering mode: the last frame, kept to redraw only what changes (`render/damage.rs`).
     pub(super) retained: crate::render::damage::Retained,
-    /// Low-power mode: this frame's instances as drawn (`render/cull.rs`).
+    /// Software-rendering mode: this frame's instances as drawn (`render/cull.rs`).
     pub(super) culled: Vec<crate::render::Instance>,
     /// The IME cursor area last handed to the platform (`sync_platform`).
     pub(super) ime_area: Option<[f32; 4]>,

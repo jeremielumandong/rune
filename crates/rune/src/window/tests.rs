@@ -552,7 +552,7 @@ thread_local! {
 
 /// A resting window as the host draws it on demand: a
 /// focusable button that widens on each press or Enter, in a still panel, with motion off as in
-/// low-power mode.
+/// software-rendering mode.
 #[cfg(not(target_os = "macos"))]
 fn on_demand_host() -> CompHost {
     fn view(n: &u32, cx: &mut crate::Cx<u32>) -> crate::El {

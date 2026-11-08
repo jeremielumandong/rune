@@ -57,8 +57,8 @@ impl<S: 'static> Runtime<S> {
         let vp = [0.0, 0.0, self.viewport.0 * s, self.viewport.1 * s];
         let mut glyph_count = 0usize;
         let mut backdrop_blurs = 0usize;
-        // Low-power software rendering leaves out blurred shadows and backdrop blur (low_power.rs).
-        let software = crate::low_power::software_rendering_effects();
+        // Software rendering leaves out blurred shadows and backdrop blur (software_rendering.rs).
+        let software = crate::software_rendering::software_rendering_effects();
         let mut ambient: Option<f32> = None;
         // Retain scope capacity across frames. Records preserve absolute instance indices
         // for images, video insertions, retained springs and compositor list ranges.

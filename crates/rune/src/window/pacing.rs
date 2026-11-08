@@ -15,7 +15,7 @@ pub(crate) fn wall_wake_deadline<S>(rt: &Runtime<S>) -> Option<Instant> {
 pub(crate) fn timer_deadline<S>(rt: &Runtime<S>) -> Option<Instant> {
     let due = wall_wake_deadline(rt)?;
     let polled = rt.wall_start.and_then(|t0| t0.checked_add(Duration::try_from_secs_f64(rt.polled_at()).ok()?));
-    Some(polled.map_or(due, |polled| due.max(polled + crate::low_power::timer_frame(TIMER_FRAME))))
+    Some(polled.map_or(due, |polled| due.max(polled + crate::software_rendering::timer_frame(TIMER_FRAME))))
 }
 
 /// Paces the frame a hidden host keeps ready to show (a launcher's cached pixels, a retained
