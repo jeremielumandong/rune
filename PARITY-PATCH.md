@@ -295,6 +295,17 @@ unchanged.
   (no layer target, and two overlapping children show through each other). A test flips the
   switch for its own thread with `low_power::with_software_rendering_effects`.
 
+### Text field menus
+
+- `rune::set_field_menus(false)` turns off text fields' own menu (upstream #246: spelling
+  suggestions, Cut, Copy, Paste, Select All) for every window: a right-click, the Menu key or
+  Shift+F10 on a field then goes to the nearest `on_secondary_press`, as before #246
+  (`field_menus.rs`; `runtime/input/secondary.rs`). On by default, as upstream. AgentOpsChat
+  turns it off: its own field menu hangs from a wrapper around each kit text input, and since
+  #246 the field's own menu won over it.
+- Test: `field_menus::tests::a_fields_own_menu_wins_unless_the_app_turns_field_menus_off`. A test
+  flips the switch for its own thread with `field_menus::with_field_menus`.
+
 ## Not ported
 
 - Presenting only the damaged area (investigated, rune/render-cpu). wgpu 30 has no

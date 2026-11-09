@@ -256,6 +256,8 @@ pub use render::prewarm_gpu_on;
 pub use render::warm_gpu;
 pub use render::warm_gpu_with;
 pub use render::damage::damage_share;
+mod field_menus;
+pub use field_menus::{field_menus, set_field_menus};
 pub use low_power::{RedrawnPixels, WakeCause, low_power_rendering, redrawn_pixels, set_low_power_rendering, set_software_rendering_effects, software_rendering_effects, take_wake_causes};
 pub use rune_motion::Anim;
 pub use rune_motion::AnimExt;

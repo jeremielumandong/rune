@@ -14,8 +14,9 @@ impl<S: 'static> Runtime<S> {
             let n = &self.nodes[index];
             if self.subtree_exiting(index) || !self.allowed(index) { break; }
             if n.handlers.on_secondary_press.is_some() || self.secondary_link_at(index, x, y).is_some() { return Some(&n.path); }
-            // A text field's own menu (`field_menu`) wins over its ancestors'.
-            if n.input.as_ref().is_some_and(|i| i.access.is_some()) { return Some(&n.path); }
+            // A text field's own menu (`field_menu`) wins over its ancestors', unless the app
+            // turned field menus off (`set_field_menus`).
+            if crate::field_menus() && n.input.as_ref().is_some_and(|i| i.access.is_some()) { return Some(&n.path); }
             if text.is_none() && self.is_selectable(index) { text = Some(n.path.as_str()); }
             let Some(p) = n.parent else { break };
             index = p;
@@ -59,6 +60,7 @@ impl<S: 'static> Runtime<S> {
     /// A secondary press at (x, y) on text field `path` with no `on_secondary_press` of its own:
     /// its menu (`field_menu`), queued.
     fn queue_field_menu(&mut self, path: &str, x: f32, y: f32) -> bool {
+        if !crate::field_menus() { return false; }
         let Some(i) = self.live(path) else { return false };
         let n = &self.nodes[i];
         if n.handlers.on_secondary_press.is_some() || n.input.as_ref().is_none_or(|i| i.access.is_none()) { return false; }
@@ -84,7 +86,7 @@ impl<S: 'static> Runtime<S> {
         if self.focused_link_menu(focused, tx) { return true; }
         let [x, _, _, y] = self.drawn_box(focused);
         let n = &self.nodes[focused];
-        if n.handlers.on_secondary_press.is_none() && n.input.as_ref().is_some_and(|i| i.access.is_some()) {
+        if crate::field_menus() && n.handlers.on_secondary_press.is_none() && n.input.as_ref().is_some_and(|i| i.access.is_some()) {
             return self.field_menu(n.path.clone(), (x, y), None, tx);
         }
         let mut index = focused;
