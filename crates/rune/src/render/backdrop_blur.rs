@@ -433,7 +433,7 @@ impl Renderer {
             };
             pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
             pass.set_pipeline(composite);
-            pass.set_bind_group(0, bind, &[]);
+            pass.set_bind_group(0, bind, self.uber_offsets);
             pass.set_bind_group(1, &pyramid.result, &[(record.slot * SLOTS) as u32 * SLOT as u32]);
             pass.set_vertex_buffer(0, self.instances.slice(..));
             pass.draw(0..4, at..at + 1);

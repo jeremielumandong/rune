@@ -50,7 +50,9 @@ fn a_steady_animating_frame_creates_no_buffers_and_skips_unchanged_globals() {
             "frame {frame} writes only the instance that moved");
         // Written in place where the backend can (`rune_staging::set_direct`), else staged.
         let staged = u64::from(now.direct == stats.direct);
-        assert_eq!((now.flushes - stats.flushes, now.submits - stats.submits), (staged, 0), "recorded into the frame");
+        // On WARP the uploads are submitted ahead of the frame instead (`Renderer::uploads_apart`).
+        let expected = if renderer.uploads_apart.is_some() { (0, staged) } else { (staged, 0) };
+        assert_eq!((now.flushes - stats.flushes, now.submits - stats.submits), expected, "recorded into the frame");
     }
     pixels.extend(target.read(device));
     assert_eq!(pixel(&pixels, 27, 24), RED, "the square reached its last position");

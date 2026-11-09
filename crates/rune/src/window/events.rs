@@ -420,13 +420,17 @@ impl<S: 'static> Host<S> {
                 if redraw { l.window.request_redraw(); }
             }
             WindowEvent::Ime(ime) => {
+                // Enabled and Disabled change nothing on screen (AgentOps patch): Windows sends
+                // them as the input method follows `set_ime_allowed`, so a redraw for each
+                // could feed itself.
+                let redraw = matches!(ime, WIme::Preedit(..) | WIme::Commit(_));
                 match ime {
                     WIme::Preedit(s, cur) => rt.ime(Ime::Preedit(s, cur)),
                     WIme::Commit(s) => rt.ime(Ime::Commit(s)),
                     WIme::Enabled => rt.ime(Ime::Enabled),
                     WIme::Disabled => rt.ime(Ime::Disabled),
                 }
-                l.window.request_redraw();
+                if redraw { l.window.request_redraw(); }
             }
             WindowEvent::MouseWheel { delta, phase, .. } => {
                 let shift = crate::runtime::SHIFT_TURNS_WHEEL && self.mods.shift_key();

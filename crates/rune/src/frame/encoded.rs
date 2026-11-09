@@ -32,8 +32,8 @@ pub enum FrameOutcome {
     /// Encoded and submitted to the GPU, then presented: a visible window's frame, its first
     /// frame during creation included, or a hidden launcher's.
     Drawn,
-    /// A frame only a timer asked for, whose build draws what is already on screen: it took
-    /// no drawable and encoded nothing.
+    /// A frame only a timer asked for (any frame, off macOS: AgentOps patch), whose build draws
+    /// what is already on screen: it took no drawable and encoded nothing.
     Unchanged,
     /// Due but not drawn: the window is covered, minimised or occluded, or no drawable came in
     /// time. The runtime may still have stepped.

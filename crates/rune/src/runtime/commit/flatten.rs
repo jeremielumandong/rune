@@ -11,8 +11,16 @@ pub(super) fn fit_room(own: &CompactStyle, parent_row: bool) -> CompactStyle {
     let raw = own.to_style();
     let zero = |d: LengthPercentageAuto| if d.is_auto() { length(0.0) } else { d };
     let main_max = if parent_row { raw.max_size.width } else { raw.max_size.height };
+    // The main side starts at its max and shrinks to the free space; the cross side
+    // stretches to the parent, which its max caps. A fixed cross size would overflow a
+    // parent narrower than the max.
+    let size = if parent_row {
+        Size { width: raw.max_size.width.into(), height: auto() }
+    } else {
+        Size { width: auto(), height: raw.max_size.height.into() }
+    };
     CompactStyle::from_style(Style {
-        size: raw.max_size.map(Into::into),
+        size,
         min_size: Size { width: zero(raw.min_size.width), height: zero(raw.min_size.height) },
         flex_grow: 1.0,
         flex_shrink: 1.0,
@@ -392,7 +400,8 @@ fn flatten_owned(
     } else {
         in_row
     };
-    let instant_changes = flags.has(ElFlags::INSTANT_CHANGES) || parent.is_some_and(|p| nodes[p].instant_changes);
+    // `El::animated_changes` animates its subtree again under an `instant_changes` ancestor.
+    let instant_changes = !el.vis.animated_changes && (flags.has(ElFlags::INSTANT_CHANGES) || parent.is_some_and(|p| nodes[p].instant_changes));
     let trace_namespace = el.cold.trace_namespace.or_else(|| parent.and_then(|p| nodes[p].trace_namespace));
     let role = el.role_name();
     let rtl = crate::el::resolve_direction(&el, parent.is_some_and(|p| nodes[p].rtl));
@@ -592,7 +601,8 @@ fn flatten_ref(
     } else {
         in_row
     };
-    let instant_changes = flags.has(ElFlags::INSTANT_CHANGES) || parent.is_some_and(|p| nodes[p].instant_changes);
+    // `El::animated_changes` animates its subtree again under an `instant_changes` ancestor.
+    let instant_changes = !el.vis.animated_changes && (flags.has(ElFlags::INSTANT_CHANGES) || parent.is_some_and(|p| nodes[p].instant_changes));
     let trace_namespace = el.cold.trace_namespace.or_else(|| parent.and_then(|p| nodes[p].trace_namespace));
     let mut style: Cow<'_, CompactStyle> = Cow::Borrowed(&el.style);
     if let Some(sx) = parent_sx {

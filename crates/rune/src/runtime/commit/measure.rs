@@ -64,6 +64,8 @@ impl<S: 'static> Runtime<S> {
             time_scale: self.time_scale,
             defaults: self.defaults,
             titlebar: self.titlebar_set(),
+            // A relayout or remount keeps the last view's; a view run starts from none.
+            scroll_bar_prefs: self.scroll_bars.prefs,
             caret: self.caret.clone(),
             caret_read: false,
             layout_seen: self.layout_seen.rects.clone(),
@@ -217,6 +219,7 @@ impl<S: 'static> Measurement<'_, S> {
             time_scale: self.time_scale,
             defaults: self.defaults,
             titlebar: self.titlebar,
+            scroll_bar_prefs: self.scroll_bar_prefs,
             caret_read: self.caret_read,
             layout_reads: self.layout_reads,
             memo_flattened: Some(memo_pending),
@@ -369,6 +372,7 @@ impl<S: 'static> Measurement<'_, S> {
             reduced_motion: this.system_reduced_motion,
             time_scale: this.time_scale,
             defaults: Default::default(),
+            scroll_bar_prefs: Default::default(),
             caret: this.caret.clone(),
             caret_read: std::cell::Cell::new(false),
             layout: this.layout_seen.clone(),
@@ -413,6 +417,7 @@ impl<S: 'static> Measurement<'_, S> {
         self.time_scale = cx.time_scale;
         self.defaults = cx.defaults;
         self.titlebar = cx.titlebar;
+        self.scroll_bar_prefs = cx.scroll_bar_prefs;
         // Reads made by memos this build reused count as made again.
         self.caret_read = cx.caret_read.get() || replayed.caret;
         self.layout_reads = cx.layout_reads.take();

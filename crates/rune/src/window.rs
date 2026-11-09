@@ -649,11 +649,22 @@ fn drain_frame(launcher: bool, visible: bool, was_shown: bool, changed: bool, qu
     !quiet && if launcher { changed || was_shown && visible } else { visible }
 }
 
+/// The drawable size for a window's physical `(width, height)`: at least 1×1, or None when an
+/// edge is past `max` (the device's `max_texture_dimension_2d`). Mid-resize, Windows can
+/// report a client height that wrapped below zero (65527); configuring a surface with it fails
+/// validation, which wgpu's default handler turns into a panic (AgentOps patch).
+pub(crate) fn drawable_size((width, height): (u32, u32), max: u32) -> Option<(u32, u32)> {
+    (width <= max && height <= max).then(|| (width.max(1), height.max(1)))
+}
+
 /// A vsynced sRGB (or non-sRGB when `srgb_blend` is set) configuration for the surface, and the
 /// first alpha mode it supports that composites translucent pixels.
 pub(crate) fn surface_config(surface: &wgpu::Surface, adapter: &wgpu::Adapter, (width, height): (u32, u32), srgb_blend: bool)
     -> Option<(wgpu::SurfaceConfiguration, Option<wgpu::CompositeAlphaMode>)> {
-    let mut config = surface.get_default_config(adapter, width.max(1), height.max(1))?;
+    // A bogus size at creation draws at the largest the device takes; the next resize fixes it.
+    let max = adapter.limits().max_texture_dimension_2d;
+    let (width, height) = drawable_size((width, height), max).unwrap_or((width.clamp(1, max), height.clamp(1, max)));
+    let mut config = surface.get_default_config(adapter, width, height)?;
     let caps = surface.get_capabilities(adapter);
     let srgb = caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(config.format);
     config.format = if srgb_blend {
@@ -671,6 +682,8 @@ pub(crate) fn surface_config(surface: &wgpu::Surface, adapter: &wgpu::Adapter, (
     // backdrops, rune-fx blend modes). On Metal it costs `framebufferOnly`, but without it they
     // quietly fall back.
     config.usage |= caps.usages & wgpu::TextureUsages::COPY_SRC;
+    // Low power copies the kept frame into the drawable (`render/damage.rs`).
+    if crate::low_power::low_power_rendering() { config.usage |= caps.usages & wgpu::TextureUsages::COPY_DST; }
     config.present_mode = wgpu::PresentMode::AutoVsync;
     config.desired_maximum_frame_latency = 2;
     Some((config, crate::render::translucency::mode(surface, adapter)))

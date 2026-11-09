@@ -6,7 +6,7 @@ impl<S: 'static> Runtime<S> {
     /// The mutation phase cannot accept an El or an unfinished measurement pass.
     pub(super) fn apply(&mut self, measured: Measured, tx: &Tx) {
         let _apply_time = crate::frame::profile::Scope::new(crate::frame::profile::Phase::Apply);
-        let Measured { layout: mut taffy, mut nodes, reduced_motion, time_scale, defaults, titlebar, caret_read, memo_flattened, memo_reused, taken_paths, .. } = measured;
+        let Measured { layout: mut taffy, mut nodes, reduced_motion, time_scale, defaults, titlebar, scroll_bar_prefs, caret_read, memo_flattened, memo_reused, taken_paths, .. } = measured;
         self.defaults = defaults;
         if crate::tooling::interaction::active() { self.interaction_reused(&memo_reused); }
         let mut scratch = std::mem::take(&mut self.apply_scratch);
@@ -17,6 +17,7 @@ impl<S: 'static> Runtime<S> {
             self.scene.set_reduced_motion(reduced_motion);
         }
         self.time_scale = time_scale;
+        self.scroll_bars.prefs = scroll_bar_prefs;
         if tx.settle { self.flights.clear(); }
         let scale = self.env.scale;
         // Culling is not a model removal. Retire offscreen scene/growth state immediately;
@@ -612,7 +613,8 @@ impl<S: 'static> Runtime<S> {
             {
                 let content = &spec.content;
                 let now = if time_scaled { self.scene.store().node_time(id) } else { now };
-                let fade = if self.reduced_motion { 0.15 } else { spec.reveal };
+                // Reduce Motion shortens a reveal; one of 0 (words shown at once) stays at once.
+                let fade = if self.reduced_motion && spec.reveal > 0.0 { spec.reveal.min(0.15) } else { spec.reveal };
                 let mounted_late = !was_present && !instant && !nodes[i].virtual_mount;
                 let st = self.reveals.entry(id).or_insert_with(|| RevealState {
                     len: if mounted_late { 0 } else { content.len() },

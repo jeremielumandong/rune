@@ -6,6 +6,8 @@ use crate::pixels::ImageAtlas;
 use crate::text::{ATLAS_SIZE, Atlas};
 
 mod backdrop_blur;
+pub(crate) mod cull;
+pub(crate) mod damage;
 mod dxbc;
 mod first_use;
 pub(crate) mod gpu_events;
@@ -457,6 +459,10 @@ impl Gpu {
         }
     }
 
+    /// The views a device's DX12 descriptor heap holds (`device_on`): 4 MB at 32 bytes a view.
+    #[cfg(not(target_arch = "wasm32"))]
+    const DESCRIPTOR_VIEWS: u32 = 1 << 17;
+
     #[cfg(not(target_arch = "wasm32"))]
     fn device_on(adapter: &wgpu::Adapter, wanted: wgpu::Features) -> Result<(wgpu::Device, wgpu::Queue), String> {
         let optional_features = wgpu::Features::TIMESTAMP_QUERY | wanted | crate::gpu::backend::free_features(adapter);
@@ -484,6 +490,15 @@ impl Gpu {
                     .using_resolution(adapter_limits.clone())
                     .using_alignment(adapter_limits)
             }
+        };
+        // DX12 makes one shader-visible descriptor heap of `max_non_sampler_bindings` views at
+        // device creation, and `Limits::default` asks for 1,000,000: about 32 MB per device
+        // (32 bytes a view on AMD and NVIDIA), whatever the app binds. Rune's bind groups hold
+        // a few views each and live as long as their atlas pages and layer targets, so
+        // `DESCRIPTOR_VIEWS` is far more than a window uses. Other backends ignore the limit.
+        let required_limits = wgpu::Limits {
+            max_non_sampler_bindings: required_limits.max_non_sampler_bindings.min(Self::DESCRIPTOR_VIEWS),
+            ..required_limits
         };
         pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("rune"),
@@ -516,6 +531,17 @@ impl Gpu {
     #[cfg(test)]
     pub(crate) fn headless_wgpu() -> Gpu {
         Self::new(Self::wgpu_instance(), None)
+    }
+
+    /// The adapter a window will draw with: `gpu::pick`'s choice for a surface not made yet,
+    /// as `warm_gpu` makes it, honouring `WGPU_ADAPTER_NAME` and `WGPU_POWER_PREF` (AgentOps
+    /// patch). For an app that decides before its first window whether it draws on a software
+    /// adapter (WARP, lavapipe); `None` when no adapter is found.
+    #[cfg(not(any(target_arch = "wasm32", target_vendor = "apple")))]
+    pub fn window_adapter_info() -> Option<wgpu::AdapterInfo> {
+        let instance = Self::instance();
+        let _serial = GPU_INIT.lock().unwrap_or_else(|e| e.into_inner());
+        crate::gpu::pick::pick(&instance, None, true).ok().map(|pick| pick.adapter.get_info())
     }
 
     /// Without `VALIDATION_INDIRECT_CALL`: Rune issues no indirect draws or dispatches, and the
@@ -571,12 +597,36 @@ impl Gpu {
         instance
     }
 
+    /// How DX12 surfaces present: through DirectComposition (`DxgiFromVisual`), which composites
+    /// alpha, except in a Remote Desktop session, where a DirectComposition swapchain on WARP
+    /// presents every frame and the session shows none of them (a black window). There the
+    /// swapchain is the HWND's own, opaque only: translucent windows and overlays draw opaque or
+    /// not at all (`translucency::mode` finds no alpha mode). `RUNE_DX12_SWAPCHAIN=hwnd` (or
+    /// `visual`) forces either. Decided once per process, when the first instance is made.
+    fn dx12_swapchain_kind() -> wgpu::Dx12SwapchainKind {
+        static KIND: std::sync::OnceLock<wgpu::Dx12SwapchainKind> = std::sync::OnceLock::new();
+        *KIND.get_or_init(|| {
+            let forced = std::env::var("RUNE_DX12_SWAPCHAIN").ok();
+            let hwnd = match forced.as_deref().map(str::trim) {
+                Some("hwnd") => true,
+                Some("visual") => false,
+                _ => remote_session(),
+            };
+            if hwnd {
+                eprintln!("rune: DX12 presents through the window's own swapchain{}", if forced.is_some() { ": RUNE_DX12_SWAPCHAIN" } else { ": Remote Desktop session" });
+                wgpu::Dx12SwapchainKind::DxgiFromHwnd
+            } else {
+                wgpu::Dx12SwapchainKind::DxgiFromVisual
+            }
+        })
+    }
+
     fn new_wgpu_instance(backends: wgpu::Backends) -> wgpu::Instance {
         let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
         descriptor.backends = backends;
         descriptor.flags.remove(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL);
         // An HWND's DXGI swapchain is opaque only; DirectComposition composites alpha on every GPU.
-        descriptor.backend_options.dx12.presentation_system = wgpu::Dx12SwapchainKind::DxgiFromVisual;
+        descriptor.backend_options.dx12.presentation_system = Self::dx12_swapchain_kind();
         // FXC ships with Windows (d3dcompiler_47.dll in System32). wgpu's default looks for
         // dxcompiler.dll on PATH, where another app's incompatible copy crashes the first
         // shader compile (Hex #587).
@@ -709,6 +759,13 @@ pub struct Renderer {
     bind_group: wgpu::BindGroup,
     bind_layout: wgpu::BindGroupLayout,
     globals: wgpu::Buffer,
+    /// The window's projection (binding 3): zeros, which select the window viewport. Layer
+    /// targets bind their own (`layers.rs`). A buffer of its own, written once, rather than a
+    /// slot past the globals that nothing writes.
+    window_projection: wgpu::Buffer,
+    /// The dynamic offsets every `set_bind_group` of an uber group passes: `[0]` when the
+    /// projection is a root CBV (`root_projection`), else none.
+    uber_offsets: &'static [u32],
     atlas: wgpu::Texture,
     /// Secondary glyph atlas pages (`1..`).
     atlas_pages: Vec<(wgpu::Texture, wgpu::BindGroup)>,
@@ -722,6 +779,9 @@ pub struct Renderer {
     spring_instances: usize,
     layers: layers::Layers,
     srgb_blend: bool,
+    /// On DX12's software adapter, WARP, the device to wait on: uploads are submitted ahead of
+    /// the frame's encoder and waited for rather than recorded into it (`upload.rs`).
+    uploads_apart: Option<wgpu::Device>,
     /// Effect slots of the uploaded instances, by index.
     effects: Vec<(u32, Instance)>,
     /// Pooled viewport-sized backdrop copies, allocated only when a slot sets `effect_backdrop`
@@ -767,19 +827,28 @@ impl Renderer {
         } else {
             None
         };
+        let root_projection = Self::root_projection(device);
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: None,
-            entries: &metallib::uber_bind_entries(),
+            entries: &metallib::uber_bind_entries_with(root_projection),
         });
         let globals = device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size: u64::from(device.limits().min_uniform_buffer_offset_alignment).max(32) + 16,
+            label: Some("globals"),
+            size: 32,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let window_projection = {
+            use wgpu::util::DeviceExt;
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("window projection"),
+                contents: &[0; 16],
+                usage: wgpu::BufferUsages::UNIFORM,
+            })
+        };
         let atlas = Self::texture(device, "glyph atlas", wgpu::TextureFormat::R8Unorm, ATLAS_SIZE, ATLAS_SIZE);
         let stand_in = Self::image_texture(device, 1, 1);
-        let bind_group = Self::bind_group(device, &bgl, &globals, &atlas, &stand_in, None);
+        let bind_group = Self::bind_group(device, &bgl, &globals, &window_projection, &atlas, &stand_in, None);
         let spring_layout = properties.map(|_| crate::gpu::springs::Bindings::layout(device));
         let layouts = [Some(&bgl), spring_layout.as_ref()];
         let layout = device.create_pipeline_layout(&metallib::uber_pipeline_layout(
@@ -806,6 +875,9 @@ impl Renderer {
             bind_group,
             bind_layout: bgl,
             globals,
+            window_projection,
+            uber_offsets: if root_projection { &[0] } else { &[] },
+            uploads_apart: root_projection.then(|| device.clone()),
             atlas,
             atlas_pages: Vec::new(),
             images: Vec::new(),
@@ -878,10 +950,23 @@ impl Renderer {
         })
     }
 
+    /// Whether the projection (binding 3) is a root CBV: on DX12's software adapter, WARP.
+    /// Windows 10's WARP (10.0.19041, what a Windows 10 VM without a GPU draws with) read it
+    /// wrong as a second CBV in the group's descriptor table: the window's projection came out
+    /// non-zero, the vertex shader took it as the viewport, and every instance but the
+    /// full-window background landed off screen, so the window showed only its background.
+    /// Windows 11's WARP takes either. GPUs keep the descriptor table, which the precompiled
+    /// Metal library's layout fingerprint also describes.
+    fn root_projection(device: &wgpu::Device) -> bool {
+        let info = device.adapter_info();
+        info.backend == wgpu::Backend::Dx12 && info.device_type == wgpu::DeviceType::Cpu
+    }
+
     fn bind_group(
         device: &wgpu::Device,
         layout: &wgpu::BindGroupLayout,
         globals: &wgpu::Buffer,
+        window_projection: &wgpu::Buffer,
         atlas: &wgpu::Texture,
         images: &wgpu::Texture,
         target: Option<&wgpu::Buffer>,
@@ -896,8 +981,8 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&atlas_view) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&image_view) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: target.unwrap_or(globals),
-                    offset: if target.is_some() { 0 } else { u64::from(device.limits().min_uniform_buffer_offset_alignment).max(32) },
+                    buffer: target.unwrap_or(window_projection),
+                    offset: 0,
                     size: std::num::NonZeroU64::new(16),
                 }) },
             ],
@@ -1096,7 +1181,7 @@ impl Renderer {
                     self.atlas_pages.get(page).map_or(&self.bind_group, |(_, bind)| bind)
                 }
             };
-            pass.set_bind_group(0, bind, &[]);
+            pass.set_bind_group(0, bind, self.uber_offsets);
             pass.draw(0..4, batch.start.max(range.start)..batch.end.min(range.end));
         }
     }
@@ -1127,6 +1212,10 @@ impl Renderer {
 
     /// Constant-time scheduler check. Present the terminal frame, then stop the display link.
     /// Deadlines are recomputed only on commits, so no per-node CPU sampling occurs on ticks.
+    /// Whether this renderer moves instances on the GPU (`with_springs`), addressing them by
+    /// index (AgentOps patch: `render::damage::keep_damaged`).
+    pub(crate) fn has_springs(&self) -> bool { self.springs.is_some() }
+
     pub fn springs_animating(&self, time: f64) -> bool {
         self.springs.as_ref().is_some_and(|p| time < p.settle_at)
     }
@@ -1430,3 +1519,14 @@ mod prewarm_tests {
         assert!(described.starts_with("Rune's Metal backend on ") && described.ends_with("(the default)"), "{described}");
     }
 }
+
+/// Whether this process runs in a Remote Desktop session (`SM_REMOTESESSION`).
+#[cfg(target_os = "windows")]
+fn remote_session() -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_REMOTESESSION};
+    // SAFETY: GetSystemMetrics reads a system value and has no preconditions.
+    unsafe { GetSystemMetrics(SM_REMOTESESSION) != 0 }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn remote_session() -> bool { false }

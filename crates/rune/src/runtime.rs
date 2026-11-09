@@ -139,6 +139,8 @@ mod help_look;
 pub use help_look::HelpLook;
 #[path = "runtime/scroll/edge.rs"]
 mod scroll_edge;
+#[path = "runtime/scroll/bars.rs"]
+mod scroll_bars;
 #[path = "runtime/scroll/x.rs"]
 mod scroll_x;
 #[path = "runtime/scroll/offset.rs"]
@@ -543,6 +545,14 @@ pub struct Runtime<S: 'static> {
     /// Per node: it drew inside its clip and the window in the last build.
     seen: Vec<bool>,
     scrolls: HashMap<NodeId, ScrollState>,
+    /// Scroll bars (`runtime/scroll/bars.rs`): when each viewport last moved, this frame's
+    /// thumbs for a press to grab, the held one, and whether one is fading out.
+    bar_fades: HashMap<NodeId, scroll_bars::Fade>,
+    bar_hits: Vec<scroll_bars::Hit>,
+    bar_drag: Option<scroll_bars::Drag>,
+    bars_fading: bool,
+    /// Viewports a hand scrolled since the last paint.
+    bar_pokes: Vec<NodeId>,
     /// The axis the current wheel or trackpad gesture scrolls (`runtime/scroll/x.rs`).
     wheel_lock: scroll_x::WheelLock,
     /// The finger that is down and the viewport a touch holds (`runtime/input/touch.rs`).
@@ -937,6 +947,11 @@ impl<S: 'static> Runtime<S> {
             drawn_scale: Vec::new(),
             seen: Vec::new(),
             scrolls: HashMap::default(),
+            bar_fades: HashMap::default(),
+            bar_hits: Vec::new(),
+            bar_drag: None,
+            bars_fading: false,
+            bar_pokes: Vec::new(),
             wheel_lock: Default::default(),
             touch: Default::default(),
             grows: HashMap::default(),

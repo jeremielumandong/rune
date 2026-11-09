@@ -56,6 +56,8 @@ pub struct Cx<S> {
     pub(super) system_reduced_motion: bool,
     pub(super) reduced_motion: bool,
     pub(super) time_scale: f32,
+    /// This commit's `show_scroll_bars` and `scroll_bar_color`.
+    pub(super) scroll_bar_prefs: scroll_bars::Prefs,
     pub(super) caret: Option<(String, [f32; 4])>,
     pub(super) caret_read: std::cell::Cell<bool>,
     pub(super) layout: layout_read::LayoutRects,
@@ -76,6 +78,7 @@ impl<S> Cx<S> {
             system_accent: self.system_accent,
             system_scroll_bars: self.system_scroll_bars,
             system_reduced_motion: self.system_reduced_motion, reduced_motion: self.reduced_motion, time_scale: self.time_scale,
+            scroll_bar_prefs: self.scroll_bar_prefs,
             caret: self.caret.clone(), caret_read: self.caret_read.clone(),
             layout: self.layout.clone(), layout_reads: self.layout_reads.clone(), _s: PhantomData,
         }
@@ -88,6 +91,7 @@ impl<S> Cx<S> {
         self.reduced_motion = other.reduced_motion;
         self.time_scale = other.time_scale;
         self.defaults = other.defaults;
+        self.scroll_bar_prefs = other.scroll_bar_prefs;
         self.caret_read.set(self.caret_read.get() || other.caret_read.get());
         let mut reads = self.layout_reads.borrow_mut();
         for read in other.layout_reads.into_inner() {
@@ -111,6 +115,7 @@ impl<S> Cx<S> {
         self.time_scale = other.time_scale;
         self.caption_color = other.caption_color;
         self.titlebar = other.titlebar;
+        self.scroll_bar_prefs = other.scroll_bar_prefs;
         self.caret_read = other.caret_read;
         self.layout_reads = other.layout_reads;
     }
@@ -235,6 +240,22 @@ impl<S> Cx<S> {
     /// Override the host preference for this commit: travel jumps, opacity/colour briefly fade.
     pub fn reduced_motion(&mut self, on: bool) {
         self.reduced_motion = on;
+    }
+    /// Show this window's scroll bars as `bars` says for this commit, whatever the system's
+    /// "Show scroll bars" preference: an app setting. [`ScrollBars::Always`](crate::ScrollBars::Always)
+    /// keeps every overflowing viewport's thumb on screen; [`ScrollBars::WhenScrolling`](crate::ScrollBars::WhenScrolling)
+    /// shows it while the viewport moves and fades it out after a short rest;
+    /// [`ScrollBars::Automatic`](crate::ScrollBars::Automatic) follows the pointing device.
+    /// Each commit starts from the system preference, so call it on every commit, as
+    /// [`Self::reduced_motion`]. [`Self::scroll_bars`] still reports the system's.
+    pub fn show_scroll_bars(&mut self, bars: crate::ScrollBars) {
+        self.scroll_bar_prefs.bars = Some(bars);
+    }
+    /// The colour this window's scroll bar thumbs draw in for this commit (its alpha is the
+    /// thumb's at rest; a dragged thumb draws a little stronger). Without one they draw in
+    /// translucent black, or white when the system appearance is dark.
+    pub fn scroll_bar_color(&mut self, color: Color) {
+        self.scroll_bar_prefs.color = Some(color);
     }
     /// Scale the window's animation clock (slow motion below 1, paused at 0). To slow or freeze
     /// only part of the window, use [`El::time_scale`](crate::El::time_scale), which multiplies

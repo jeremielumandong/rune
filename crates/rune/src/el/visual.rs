@@ -115,6 +115,9 @@ pub struct VisualCold {
     pub mark: u32,
     /// `El::mirror_in_rtl`: its icon flips left to right in a right-to-left element.
     pub(crate) mirror_rtl: bool,
+    /// `El::animated_changes`: this subtree animates again under an `El::instant_changes`
+    /// ancestor.
+    pub(crate) animated_changes: bool,
 }
 
 impl Empty for VisualCold {
@@ -170,6 +173,7 @@ impl Empty for VisualCold {
         rotate: 0.0,
         mark: 0,
         mirror_rtl: false,
+        animated_changes: false,
     };
 }
 

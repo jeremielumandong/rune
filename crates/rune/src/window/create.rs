@@ -221,10 +221,12 @@ impl<S: 'static> Host<S> {
             quiet: false,
             timer_frame: TimerFrame::default(),
             presented: None,
-            #[cfg(target_os = "windows")]
-            steady_until: None,
-            #[cfg(target_os = "windows")]
-            steady_frame: false,
+            paced_until: None,
+            retained: crate::render::damage::Retained::new(),
+            culled: Vec::new(),
+            culler: Default::default(),
+            damaged: Vec::new(),
+            ime_area: None,
         });
         if launcher { self.win.as_mut().unwrap().first_frame.prepare(); }
         self.apply_placement(event_loop);

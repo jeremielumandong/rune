@@ -5,6 +5,13 @@
 //! start of `encode_layers*` and `draw_target_range_with`), or submitted ahead of a draw into a
 //! caller's pass (`draw_range*`) and of `Renderer::submit`. Globals are written only when they
 //! change, and instances only in the spans that changed.
+//!
+//! On WARP (`Renderer::uploads_apart`) they are always submitted ahead and waited for, never
+//! recorded into the frame's encoder: Windows 10's WARP (10.0.19041, what a Windows 10 VM
+//! without a GPU draws with) let a frame's draws read buffers before the copies into them had
+//! landed, so a low-power damaged redraw (`damage.rs`) drew differently from a whole frame. The
+//! wait gives up overlapping a frame's uploads with the previous frame's drawing; on a software
+//! adapter both run on the CPU anyway.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -90,8 +97,14 @@ fn same(a: &[Instance], b: &[Instance]) -> bool {
 fn pack((w, h): (u32, u32)) -> u64 { u64::from(w) << 32 | u64::from(h) }
 
 impl Renderer {
-    /// Records pending uploads into `encoder`, ahead of the renderer's commands in it.
+    /// Records pending uploads into `encoder`, ahead of the renderer's commands in it; on WARP,
+    /// submits them ahead of it and waits for them instead (module docs).
     pub(super) fn flush_uploads(&self, encoder: &mut wgpu::CommandEncoder) {
+        if let Some(device) = &self.uploads_apart {
+            self.submit_uploads();
+            let _ = device.poll(wgpu::PollType::wait_indefinitely());
+            return;
+        }
         if let Some(s) = &self.uploads.staging { s.flush(encoder); }
     }
 
@@ -139,7 +152,7 @@ impl Renderer {
             if page.data.is_empty() { changed |= self.images[index].is_some(); self.images[index] = None; continue; }
             if self.images[index].as_ref().is_none_or(|(t, _)| t.width() != page.width || t.height() != page.height) {
                 let texture = Self::image_texture(device, page.width, page.height);
-                let bind = Self::bind_group(device, &self.bind_layout, &self.globals, &self.atlas, &texture, None);
+                let bind = Self::bind_group(device, &self.bind_layout, &self.globals, &self.window_projection, &self.atlas, &texture, None);
                 self.images[index] = Some((texture, bind));
                 changed = true;
                 page.dirty = Some((0, page.height));
@@ -204,7 +217,7 @@ impl Renderer {
         for (index, page) in atlas.pages.iter_mut().enumerate() {
             if index >= self.atlas_pages.len() {
                 let texture = Self::texture(device, "glyph atlas", wgpu::TextureFormat::R8Unorm, ATLAS_SIZE, ATLAS_SIZE);
-                let bind = Self::bind_group(device, &self.bind_layout, &self.globals, &texture, &texture, None);
+                let bind = Self::bind_group(device, &self.bind_layout, &self.globals, &self.window_projection, &texture, &texture, None);
                 self.atlas_pages.push((texture, bind));
                 atlas_changed = true;
             }

@@ -135,6 +135,15 @@ impl El {
         self.cold_mut().scroll_edges.anchor = true;
         self
     }
+    /// On a scroll viewport, draw no scroll bar: for a viewport that draws its own, or a strip
+    /// (tabs, chips) whose overflow shows by itself. Every other viewport draws a thumb over its
+    /// trailing edge (and its bottom edge when it scrolls sideways) while its content overflows,
+    /// shown as [`Cx::show_scroll_bars`](crate::Cx::show_scroll_bars) or the system's "Show
+    /// scroll bars" preference says.
+    pub fn scroll_bar_hidden(mut self) -> Self {
+        self.cold_mut().scroll_edges.no_bar = true;
+        self
+    }
 }
 
 /// How a scroll viewport's edges fade with the content hidden under them ([`El::scroll_fade`]).

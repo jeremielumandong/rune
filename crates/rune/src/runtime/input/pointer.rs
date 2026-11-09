@@ -15,6 +15,11 @@ impl<S: 'static> Runtime<S> {
         if moved { self.hover_paused = false; self.release_hover_hold(); }
         self.pointer = Some((x, y));
         if self.in_viewport(x, y) { self.left_in_capture = false; }
+        // A held scroll bar thumb takes the pointer: content under it hears nothing.
+        if self.bar_drag.is_some() {
+            self.drag_scroll_bar(x, y);
+            return;
+        }
         for &(id, rect) in &self.hits {
             if self.hit_contains(id, rect, x, y)
                 && let Some(&i) = self.node_index.get(&id)
@@ -70,7 +75,7 @@ impl<S: 'static> Runtime<S> {
         visual_changed || help_changed || self.queue.len() != queued || self.capture_inside != capture_inside
     }
 
-    pub(crate) fn pointer_captured(&self) -> bool { self.capture.is_some() || self.secondary_capture.is_some() }
+    pub(crate) fn pointer_captured(&self) -> bool { self.capture.is_some() || self.secondary_capture.is_some() || self.bar_drag.is_some() }
 
     /// The host's window content top-left in desktop pixels; `None` where it has none.
     pub(crate) fn set_window_pixels(&mut self, pixels: Option<(i32, i32)>) {
@@ -99,6 +104,7 @@ impl<S: 'static> Runtime<S> {
         self.input_click.clear();
         self.capture = None;
         self.secondary_capture = None;
+        self.bar_drag = None;
         self.capture_inside = false;
         self.pointer_leave();
         self.drag_files_leave();
@@ -193,6 +199,11 @@ impl<S: 'static> Runtime<S> {
             }
             return;
         }
+        // A press on a scroll bar's thumb drags the viewport (`runtime/scroll/bars.rs`). It
+        // isn't a click on the content: focus and the selection stay where they are.
+        if self.grab_scroll_bar(x, y, target) {
+            return;
+        }
         self.playground_pointer_down(x);
         self.press_selection(target, x, y);
         // Inside a draggable row, dragging drags the row; clicks still select words and lines.
@@ -281,6 +292,13 @@ impl<S: 'static> Runtime<S> {
             self.pointer = Some((x, y));
             return;
         }
+        if self.release_scroll_bar() {
+            let left = self.left_in_capture;
+            self.move_pointer(x, y, false);
+            self.left_in_capture = left;
+            self.leave_after_release();
+            return;
+        }
         self.release_capture(x, y);
     }
 
@@ -337,7 +355,7 @@ impl<S: 'static> Runtime<S> {
 
     pub fn pointer_leave(&mut self) {
         self.wheel_lost();
-        if self.capture.is_none() && self.secondary_capture.is_none() {
+        if self.capture.is_none() && self.secondary_capture.is_none() && self.bar_drag.is_none() {
             self.pointer = None;
             self.hovered = None;
             self.left_in_capture = false;
@@ -349,7 +367,7 @@ impl<S: 'static> Runtime<S> {
 
     /// A press on an element is held (the hand drives whatever follows it).
     pub fn pressing(&self) -> bool {
-        self.capture.is_some()
+        self.capture.is_some() || self.bar_drag.is_some()
     }
     pub fn pointer(&self) -> Option<(f32, f32)> {
         self.pointer
@@ -423,6 +441,7 @@ impl<S: 'static> Runtime<S> {
             log_event!(self, "wheel {dy:.1}");
             if st.offset != before { self.scroll_cancels_press(id); }
         }
+        self.poke_scroll_bar(id);
     }
 
     /// Releases a scroll with `velocity` (points per second, positive moves content down);

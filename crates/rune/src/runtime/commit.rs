@@ -25,6 +25,7 @@ pub(super) struct Measurement<'a, S: 'static> {
     pub(super) defaults: cx::ViewDefaults,
     /// `Cx::set_titlebar` and `Cx::titlebar_height`, as the view sets them.
     pub(super) titlebar: crate::titlebar::TitlebarSet,
+    pub(super) scroll_bar_prefs: scroll_bars::Prefs,
     pub(super) commits: u64,
     /// The last commit's nodes. A pass that commits drops the text layouts of the ones it keeps.
     pub(super) nodes: &'a mut [Node],
@@ -65,6 +66,7 @@ pub(super) struct Measured {
     pub(super) time_scale: f32,
     pub(super) defaults: cx::ViewDefaults,
     pub(super) titlebar: crate::titlebar::TitlebarSet,
+    pub(super) scroll_bar_prefs: scroll_bars::Prefs,
     pub(super) caret_read: bool,
     pub(super) layout_reads: layout_read::LayoutReads,
     pub(super) memo_flattened: Option<Vec<memo_reuse::PendingFlat>>,

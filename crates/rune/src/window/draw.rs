@@ -3,12 +3,8 @@
 
 use super::*;
 
-/// How long a Windows window keeps presenting every refresh after its last change. With G-SYNC
-/// or FreeSync in windowed mode the display refreshes when the foreground window presents, so a
-/// hover's lone presents swing the refresh rate, and many panels' brightness with it (Hex #689).
-/// A steady run at the display's rate, then rest, changes the rate once per interaction.
-#[cfg(target_os = "windows")]
-const STEADY: Duration = Duration::from_secs(1);
+/// Every frame builds first and presents only what changed (AgentOps patch).
+pub(super) const ON_DEMAND: bool = !cfg!(target_os = "macos");
 
 impl<S: 'static> Host<S> {
     /// A shown frame with no drawable. Asking for a redraw here would turn the loop at once, for
@@ -74,6 +70,12 @@ impl<S: 'static> Host<S> {
         // A missed frame's retry, or the timer pacing unpaced motion: input waits for it, and
         // `new_events` runs due timers meanwhile.
         if !resizing && l.backing_off(Instant::now()) { return; }
+        // Low-power mode: a frame asked for before the pace allows waits for it, as a retry does.
+        let started = Instant::now();
+        if !resizing && !hidden && let Some(at) = l.paced_until.filter(|at| *at > started) {
+            l.retry = Some(at);
+            return;
+        }
         // The frame a due timer asked for is here, drawing or running covered below.
         l.timer_frame.drawn();
         // Starting the display link for a window that isn't on screen would wait for a tick that
@@ -144,7 +146,11 @@ impl<S: 'static> Host<S> {
         if self.frame_reports.wanted() { self.frame_reports.set_refresh(display_hz(l)); }
         // Only a timer woke the resting window: build the frame first, and take no drawable
         // when it draws what's on screen.
-        let quiet = std::mem::take(&mut l.quiet) && !hidden && !live_resize && l.presented.is_some() && self.comp.is_none()
+        // AgentOps patch (PARITY-PATCH.md): off macOS, whose display link paces input frames, a
+        // frame input or an update asked for does the same, so a mouse move, click or key that
+        // changes nothing on screen presents nothing. Over Remote Desktop and on a software
+        // adapter, presenting each one cost a core.
+        let quiet = (std::mem::take(&mut l.quiet) || ON_DEMAND) && !hidden && !live_resize && l.presented.is_some() && self.comp.is_none()
             && self.trace.is_none() && self.args.trace.is_none() && self.rt.live_visible()
             && self.rt.window_frame.is_none() && self.frame_anim.is_none();
         #[cfg(target_os = "macos")]
@@ -164,6 +170,9 @@ impl<S: 'static> Host<S> {
                 l.stop_pacing();
                 self.meter.set_pacing(l.pacing_state(false));
                 self.frame_reports.unchanged(target);
+                // Low power paces builds as it paces draws: a stream of wakes or events that
+                // change nothing builds at most one frame a pace, not one each (`low_power`).
+                l.paced_until = crate::low_power::pace_after(!hidden, started, Instant::now());
                 return;
             }
             Some((animating, dt, now))
@@ -257,6 +266,26 @@ impl<S: 'static> Host<S> {
             format: (target_format != l.config.format).then_some(target_format),
             ..Default::default()
         });
+        // Low power: what changed since the kept frame, before the uploads take the image
+        // atlas's written rows (`render/damage.rs`).
+        let size = (l.config.width, l.config.height);
+        // Low power: the instances with the pixels they can't change kept from the shader
+        // (`render/cull.rs`).
+        let culled = crate::low_power::low_power_rendering() && self.comp.is_none();
+        if culled { l.culler.cull(&rt.instances, size, &mut l.culled, rt.surfaces.is_empty()); }
+        let instances = if culled { &l.culled[..] } else { &rt.instances[..] };
+        let tracked = (crate::low_power::low_power_rendering() && self.comp.is_none() && l.alpha.is_none() && !rt.transparent
+            && rt.surfaces.is_empty() && rt.materials.is_empty() && frame.texture.usage().contains(wgpu::TextureUsages::COPY_DST))
+            .then(|| {
+                l.retained.fit(&gpu.device, l.config.format, target_format, size);
+                let around = crate::render::damage::Surroundings { size, clear: rt.clear_color(), srgb: rt.srgb_blend(),
+                    scale: rt.env.scale, atlas_resets: rt.text.atlas.resets };
+                let texels = crate::render::damage::Texels::of(&rt.images);
+                (around, l.retained.damage(&rt.instances, instances, around, &texels))
+            });
+        // Low power: a damaged redraw draws only the instances that touch its rectangles.
+        let narrowed = culled && !renderer.has_springs()
+            && tracked.as_ref().is_some_and(|(_, damage)| crate::render::damage::keep_damaged(instances, damage, size, &mut l.damaged));
         renderer.upload_images(&gpu.device, &gpu.queue, &mut rt.images);
         renderer.prepare_surfaces(&gpu.device, &gpu.queue, &rt.surfaces, (l.config.width, l.config.height));
         let mut enc = gpu.device.create_command_encoder(&Default::default());
@@ -276,9 +305,27 @@ impl<S: 'static> Host<S> {
             };
             c.render(&mut f);
             animating |= c.animating();
+            l.retained.forget();
         } else {
-            renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (l.config.width, l.config.height));
-            renderer.draw(&mut enc, target, rt.clear_color());
+            let drawn = if narrowed { &l.damaged[..] } else { instances };
+            renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, drawn, (l.config.width, l.config.height));
+            match tracked.filter(|_| renderer.damage_tracking_fits()) {
+                Some((around, damage)) => {
+                    l.retained.fit_fill(&gpu.device, &gpu.queue, around.clear);
+                    l.retained.blit(&gpu.device, &mut enc);
+                    if let (Some(kept), Some(fill)) = (l.retained.view(), l.retained.fill()) {
+                        renderer.draw_damaged(&mut enc, kept, around.clear, &damage, fill);
+                        l.retained.copy_to(&mut enc, &frame.texture);
+                    }
+                    l.retained.drawn(around, &damage);
+                }
+                None => {
+                    // The whole frame after all: all of its instances.
+                    if narrowed { renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, instances, (l.config.width, l.config.height)); }
+                    renderer.draw(&mut enc, target, rt.clear_color());
+                    l.retained.forget();
+                }
+            }
         }
         if let Some(alpha) = &l.alpha { alpha.draw(&mut enc, &view); }
         renderer.submit(&gpu.queue, enc);
@@ -306,6 +353,7 @@ impl<S: 'static> Host<S> {
         }
         let submitted = Instant::now();
         self.clock.presented(rt, submitted);
+        l.paced_until = crate::low_power::pace_after(!hidden, started, submitted);
         self.meter.presented();
         #[cfg(target_os = "macos")]
         if let Some(pacing) = &mut l.native.pacing { pacing.presented(submitted); }
@@ -333,24 +381,11 @@ impl<S: 'static> Host<S> {
         // link going; without one its timer waits a frame in `wake_deadline`.
         let next_tick = l.next_tick(now).filter(|_| !hidden);
         let rests = !hidden && !(self.trace.is_some() && self.args.frames.is_some());
-        #[cfg(target_os = "windows")]
-        let steady = {
-            // A frame the hold alone asked for changes nothing unless it draws something new.
-            let held = std::mem::take(&mut l.steady_frame);
-            let changed = !held || (self.comp.is_none() && !l.presented.as_ref().is_some_and(|p| p.same(rt, &l.config)));
-            if changed { l.steady_until = Some(now + STEADY); }
-            !hidden && l.steady_until.is_some_and(|until| now < until)
-        };
         self.idle = Presented::settle(&mut l.presented, rt, &l.config, animating || self.frame_anim.is_some(), next_tick, rests, self.comp.is_some());
         #[cfg(target_os = "macos")]
         if !hidden && let Some(latency) = l.native.launch_drawables.settle(self.idle, now) {
             l.config.desired_maximum_frame_latency = latency;
             l.surface.configure(&gpu.device, &l.config);
-        }
-        #[cfg(target_os = "windows")]
-        if self.idle && steady {
-            l.steady_frame = true;
-            l.window.request_redraw();
         }
         if !hidden && (!self.idle || (self.trace.is_some() && self.args.frames.is_some())) {
             // Without a running display link, macOS hands out drawables faster than the
@@ -358,7 +393,11 @@ impl<S: 'static> Host<S> {
             #[cfg(target_os = "macos")]
             if !l.native.pacing.as_mut().is_some_and(|p| p.start()) { l.retry = Some(now + TIMER_FRAME); }
             #[cfg(not(target_os = "macos"))]
-            l.window.request_redraw();
+            match l.paced_until {
+                // Low-power mode: the retry asks for the frame when the pace allows it.
+                Some(at) => l.retry = Some(at),
+                None => l.window.request_redraw(),
+            }
             self.meter.set_pacing(l.pacing_state(true));
         } else {
             l.stop_pacing();

@@ -82,3 +82,17 @@ fn grow_and_content_do_not_size_the_fitted_box() {
     assert_eq!((a[2..].to_vec(), b[2..].to_vec()), (vec![300.0, 150.0], vec![300.0, 150.0]),
         "a 200 pt child doesn't take its cell a bigger share of the row");
 }
+
+#[test]
+fn a_max_wider_than_the_parent_does_not_overflow_it() {
+    fn view(r: &f32, _: &mut Cx<f32>) -> El {
+        col().child(col().size(300.0, 400.0).items_center().child(el().key("pic").max_w(480.0).max_h(300.0).aspect_fit(*r)))
+    }
+    let rt = run(1.6, view);
+    assert_eq!(rects(&rt, &["pic"])[0], [0.0, 0.0, 300.0, 187.5], "the cross side is the parent's, not the max");
+    fn wide(r: &f32, _: &mut Cx<f32>) -> El {
+        col().child(col().size(800.0, 400.0).items_center().child(el().key("pic").max_w(480.0).max_h(300.0).aspect_fit(*r)))
+    }
+    let rt = run(1.6, wide);
+    assert_eq!(rects(&rt, &["pic"])[0], [160.0, 0.0, 480.0, 300.0], "a roomy parent still stops at the max");
+}

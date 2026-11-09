@@ -202,6 +202,7 @@ impl<S: 'static> Runtime<S> {
         st.direct = true;
         log_event!(self, "wheel-x {dx:.1}");
         if st.x.offset != before { self.scroll_cancels_press(id); }
+        self.poke_scroll_bar(id);
     }
 
     /// Releases a scroll with velocity (vx, vy) in points per second (positive moves content

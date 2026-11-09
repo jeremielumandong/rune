@@ -20,6 +20,10 @@ pub(crate) struct Presented {
     scale: f32,
     transparent: bool,
     composed: bool,
+    /// The glyph atlas's `(rasterized, resets)` when it was drawn (AgentOps patch): a frame
+    /// built after glyph work never counts as the same, even when its instances are, so the
+    /// frame that shows a newly rasterized or re-placed glyph is always presented.
+    glyphs: (u64, u64),
 }
 
 impl Presented {
@@ -39,8 +43,9 @@ impl Presented {
     pub(crate) fn record<S: 'static>(this: &mut Option<Self>, rt: &Runtime<S>, config: &wgpu::SurfaceConfiguration, composed: bool) {
         let (clear, size, srgb, scale, transparent) = (rt.clear_color(), (config.width, config.height), rt.srgb_blend(), rt.env.scale, rt.transparent);
         let p = this.get_or_insert_with(|| Self {
-            instances: Vec::new(), clear, size, format: config.format, srgb, scale, transparent, composed,
+            instances: Vec::new(), clear, size, format: config.format, srgb, scale, transparent, composed, glyphs: (0, 0),
         });
+        p.glyphs = (rt.text.atlas.rasterized, rt.text.atlas.resets);
         if composed { p.instances.clear() } else { p.instances.clone_from(&rt.instances) }
         (p.clear, p.size, p.format, p.srgb, p.scale, p.transparent, p.composed) = (clear, size, config.format, srgb, scale, transparent, composed);
     }
@@ -63,6 +68,7 @@ impl Presented {
             && self.scale == rt.env.scale && self.clear == rt.clear_color() && self.transparent == rt.transparent
             && rt.surfaces.is_empty() && rt.materials.is_empty()
             && atlas.dirty.is_none() && atlas.pages.iter().all(|p| p.dirty.is_none())
+            && self.glyphs == (atlas.rasterized, atlas.resets)
             && rt.images.pages.iter().all(|p| p.dirty.is_none())
             && bytemuck::cast_slice::<_, u8>(&self.instances) == bytemuck::cast_slice::<_, u8>(&rt.instances)
     }

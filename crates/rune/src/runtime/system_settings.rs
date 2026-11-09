@@ -8,6 +8,8 @@ use super::*;
 pub(super) struct ScrollBarHost {
     pub(super) state: crate::platform::scroll_bars::SystemScrollBars,
     pub(super) runtime_id: u64,
+    /// The last commit's `Cx::show_scroll_bars` and `Cx::scroll_bar_color`.
+    pub(super) prefs: scroll_bars::Prefs,
 }
 
 impl Default for ScrollBarHost {
@@ -16,6 +18,7 @@ impl Default for ScrollBarHost {
         Self {
             state: Default::default(),
             runtime_id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+            prefs: Default::default(),
         }
     }
 }

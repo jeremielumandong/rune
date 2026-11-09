@@ -510,6 +510,8 @@ pub(crate) struct ScrollEdges {
     pub(crate) margin: f32,
     /// The viewport keeps its top row where it is when content above it changes.
     pub(crate) anchor: bool,
+    /// `El::scroll_bar_hidden`: the runtime draws no scroll bar on this viewport.
+    pub(crate) no_bar: bool,
 }
 
 /// The axes a scroll viewport moves on: `El::scroll` (vertical), `El::scroll_x`, `El::scroll_xy`.

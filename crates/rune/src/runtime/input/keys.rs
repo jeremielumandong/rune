@@ -127,6 +127,7 @@ impl<S: 'static> Runtime<S> {
             .or_else(|| (0..self.nodes.len()).find(|&i| pageable(i)));
         let Some(i) = i else { return false };
         if !self.page_to(i, |offset, max, page| match ev.key { PageUp => offset - page, PageDown => offset + page, Home => 0.0, _ => max }) { return false; }
+        self.poke_scroll_bar(self.nodes[i].id);
         log_event!(self, "page {:?}", ev.key);
         true
     }

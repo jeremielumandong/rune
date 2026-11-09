@@ -163,6 +163,7 @@ impl<S: 'static> Measurement<'_, S> {
             time_scale: self.time_scale,
             defaults: self.defaults,
             titlebar: self.titlebar,
+            scroll_bar_prefs: self.scroll_bar_prefs,
             caret_read: self.caret_read,
             layout_reads: self.layout_reads,
             memo_flattened: None,

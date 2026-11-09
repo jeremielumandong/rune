@@ -733,6 +733,8 @@ impl<S: 'static> Runtime<S> {
         self.end_exit_mask();
         self.record_rewind();
         animating |= source(self.loops_active, AnimSource::LOOP);
+        // A scroll bar fading out after its viewport came to rest (`runtime/scroll/bars.rs`).
+        animating |= source(self.bars_fading, AnimSource::SCROLL);
         animating |= source(self.static_scale_settling || self.pixel_snap.easing(), AnimSource::SCALE_SETTLE);
         animating |= source(self.videos_active, AnimSource::VIDEO);
         animating |= source(self.draw_text_flights(), AnimSource::TEXT_FLIGHT);

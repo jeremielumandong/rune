@@ -429,8 +429,8 @@ impl Renderer {
                     label: Some("layer projection"), size: 16, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 });
-                let base = Self::bind_group(device, &self.bind_layout, &self.globals, &self.atlas, &self.atlas, Some(&projection));
-                let composite = Self::bind_group(device, &self.bind_layout, &self.globals, &self.atlas, &texture, None);
+                let base = Self::bind_group(device, &self.bind_layout, &self.globals, &self.window_projection, &self.atlas, &self.atlas, Some(&projection));
+                let composite = Self::bind_group(device, &self.bind_layout, &self.globals, &self.window_projection, &self.atlas, &texture, None);
                 self.layers.targets[index] = Some(Target { texture, view, projection,
                     identity: self.layers.allocations + 1, composite_parent: None,
                     quad: Self::instance_buffer(device, 1), base, composite, images: Vec::new(), glyphs: Vec::new(), image_generation: u64::MAX, blur: None,
@@ -478,7 +478,7 @@ impl Renderer {
             let t = self.layers.targets[index].as_ref().unwrap();
             let parent_identity = parent.map(|p| self.layers.targets[p].as_ref().unwrap().identity);
             if t.composite_parent == parent_identity { continue; }
-            let composite = Self::bind_group(device, &self.bind_layout, &self.globals, &self.atlas, &t.texture,
+            let composite = Self::bind_group(device, &self.bind_layout, &self.globals, &self.window_projection, &self.atlas, &t.texture,
                 parent.map(|p| &self.layers.targets[p].as_ref().unwrap().projection));
             let t = self.layers.targets[index].as_mut().unwrap();
             t.composite = composite;
@@ -526,10 +526,10 @@ impl Renderer {
             if t.image_generation == self.layers.image_generation { continue; }
             t.images.clear();
             t.images.extend(self.images.iter().map(|page| page.as_ref().map(|(texture, _)|
-                Self::bind_group(device, &self.bind_layout, &self.globals, &self.atlas, texture, Some(&t.projection)))));
+                Self::bind_group(device, &self.bind_layout, &self.globals, &self.window_projection, &self.atlas, texture, Some(&t.projection)))));
             t.glyphs.clear();
             t.glyphs.extend(self.atlas_pages.iter().map(|(texture, _)|
-                Self::bind_group(device, &self.bind_layout, &self.globals, texture, texture, Some(&t.projection))));
+                Self::bind_group(device, &self.bind_layout, &self.globals, &self.window_projection, texture, texture, Some(&t.projection))));
             t.image_generation = self.layers.image_generation;
         }
     }
@@ -624,7 +624,7 @@ impl Renderer {
                 } else { &self.layers.pipelines.iter().find(|(f, _)| *f == format).expect("Renderer::add_format first").1 };
                 pass.set_pipeline(pipeline);
                 if let Some(properties) = &self.springs { pass.set_bind_group(1, &properties.group, &[]); }
-                pass.set_bind_group(0, &t.composite, &[]);
+                pass.set_bind_group(0, &t.composite, self.uber_offsets);
                 pass.set_vertex_buffer(0, t.quad.slice(..));
                 pass.draw(0..4, 0..1);
             } else if l.opacity == 1.0 {
@@ -635,6 +635,12 @@ impl Renderer {
                     let (x1, y1) = (edge(l.clip[2].ceil(), origin[0], size[0]), edge(l.clip[3].ceil(), origin[1], size[1]));
                     if x1 > x0 && y1 > y0 {
                         let outer = pass.scissor();
+                        // Inside the scissor already set (a damaged rectangle, `render/damage.rs`).
+                        let (x0, y0, x1, y1) = match outer {
+                            Some([ox, oy, ow, oh]) => (x0.max(ox), y0.max(oy), x1.min(ox + ow), y1.min(oy + oh)),
+                            None => (x0, y0, x1, y1),
+                        };
+                        if x1 <= x0 || y1 <= y0 { cursor = l.end + 1; continue; }
                         pass.set_scissor(Some([x0, y0, x1 - x0, y1 - y0]), size);
                         self.draw_layer_range(pass, format, l.begin + 1..l.end, target, hook);
                         pass.set_scissor(outer, size);

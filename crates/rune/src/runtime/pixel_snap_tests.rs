@@ -207,7 +207,8 @@ fn text_keeps_its_place_against_its_fill() {
 #[test]
 fn scrolled_rows_stay_crisp_and_keep_their_spacing() {
     fn view(_: &(), _: &mut Cx<()>) -> El {
-        col().size(40.0, 60.0).gap(1.1).scroll(crate::el::ScrollSpec { stick_bottom: false })
+        // Without a scroll bar: the wheel would show its thumb among the fills.
+        col().size(40.0, 60.0).gap(1.1).scroll(crate::el::ScrollSpec { stick_bottom: false }).scroll_bar_hidden()
             .children((0..20).map(|i| el().key(format!("r{i}")).size(20.0, 7.3).fill(Color::WHITE)))
     }
     let mut rt = Runtime::new((), view, (40.0, 60.0), Env::new(true, 2.0));

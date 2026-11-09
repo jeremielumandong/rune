@@ -63,9 +63,22 @@ pub(super) fn uber_wgsl_hash(wgsl: &str) -> blake3::Hash {
 }
 
 pub(super) const fn uber_bind_entries() -> [wgpu::BindGroupLayoutEntry; 4] {
+    uber_bind_entries_with(false)
+}
+
+/// The uber layout; with `root_projection`, the projection (binding 3) takes a dynamic offset,
+/// always 0, which wgpu's DX12 backend binds as a root CBV instead of a second CBV in the
+/// group's descriptor table (render.rs, `Renderer::root_projection`). The precompiled shaders
+/// serve both: the HLSL and its DXBC are the same, only the root signature differs.
+pub(super) const fn uber_bind_entries_with(root_projection: bool) -> [wgpu::BindGroupLayoutEntry; 4] {
     let uniform = wgpu::BindingType::Buffer {
         ty: wgpu::BufferBindingType::Uniform,
         has_dynamic_offset: false,
+        min_binding_size: None,
+    };
+    let projection = wgpu::BindingType::Buffer {
+        ty: wgpu::BufferBindingType::Uniform,
+        has_dynamic_offset: root_projection,
         min_binding_size: None,
     };
     let texture = wgpu::BindingType::Texture {
@@ -77,7 +90,7 @@ pub(super) const fn uber_bind_entries() -> [wgpu::BindGroupLayoutEntry; 4] {
         wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::VERTEX_FRAGMENT, ty: uniform, count: None },
         wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::FRAGMENT, ty: texture, count: None },
         wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::FRAGMENT, ty: texture, count: None },
-        wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::VERTEX_FRAGMENT, ty: uniform, count: None },
+        wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::VERTEX_FRAGMENT, ty: projection, count: None },
     ]
 }
 

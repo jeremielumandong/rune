@@ -80,6 +80,7 @@ impl<S: 'static> Runtime<S> {
         if !horizontal { st.pinned = false; }
         st.direct = true;
         self.scroll_cancels_press(id);
+        self.poke_scroll_bar(id);
     }
 
     /// The touch lifted from viewport `id` (None when it held none) with `velocity` along its

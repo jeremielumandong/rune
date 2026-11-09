@@ -192,7 +192,7 @@ fn same_visual_cold(a: &crate::el::VisualCold, b: &crate::el::VisualCold) -> boo
         pixels, pixels_fit, effect, backdrop_blur, hover_motion, hover_within,
         group_opacity, group_color, hover_alone, hover_share, hover_focus, icon_turn, cache_key, offset_motion, scale_motion,
         origin, rotate_motion, child_exit, enter_delay, motion_intent, instant_motion, clip_to_content, flight_crop,
-        hold_landing, offset, paint_alpha, layer_opacity, blur, rotate, mark, mirror_rtl,
+        hold_landing, offset, paint_alpha, layer_opacity, blur, rotate, mark, mirror_rtl, animated_changes,
     } = b;
     (match (&a.surface, surface) {
         (None, None) => true,
@@ -228,6 +228,7 @@ fn same_visual_cold(a: &crate::el::VisualCold, b: &crate::el::VisualCold) -> boo
         && a.hold_landing == *hold_landing
         && a.offset == *offset && a.paint_alpha == *paint_alpha && a.layer_opacity == *layer_opacity
         && a.blur == *blur && a.rotate == *rotate && a.mark == *mark && a.mirror_rtl == *mirror_rtl
+        && a.animated_changes == *animated_changes
 }
 
 pub(super) fn same_visual(a: &Visual, b: &Visual) -> bool {

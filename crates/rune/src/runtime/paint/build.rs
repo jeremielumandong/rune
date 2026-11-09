@@ -34,6 +34,9 @@ impl<S: 'static> Runtime<S> {
         let mut video_signature = 0u64;
         self.loop_wake = None;
         self.overlay_hits.clear();
+        self.begin_scroll_bars();
+        // Viewports whose content is still painting; each draws its bars as its subtree ends.
+        let mut bars_open: Vec<scroll_bars::Open> = Vec::new();
         let n_nodes = self.nodes.len();
         self.inh_scratch.clear();
         self.turn_scratch.clear();
@@ -58,6 +61,8 @@ impl<S: 'static> Runtime<S> {
         let vp = [0.0, 0.0, self.viewport.0 * s, self.viewport.1 * s];
         let mut glyph_count = 0usize;
         let mut backdrop_blurs = 0usize;
+        // Low-power software rendering leaves out blurred shadows and backdrop blur (low_power.rs).
+        let software = crate::low_power::software_rendering_effects();
         let mut ambient: Option<f32> = None;
         // Retain scope capacity across frames. Records preserve absolute instance indices
         // for images, video insertions, retained springs and compositor list ranges.
@@ -113,27 +118,31 @@ impl<S: 'static> Runtime<S> {
             // A flight paints outside every ancestor's layer, above the whole window.
             let lift = flying && self.flying.iter().any(|f| f.0 == node_id);
             let raised = self.nodes[i].vis_flags.raise() && !lift;
-            if lift || raised {
-                while let Some((_, start, surface_start)) = layers.pop() {
-                    if active_cache.is_some_and(|ac| ac.instance_start == start) {
-                        let ac = active_cache.take().unwrap();
-                        self.close_cached_layer(ac, start, surface_start, &mut glyph_count);
-                    } else {
-                        crate::render::end_layer(&mut self.instances, &mut self.surfaces, &mut self.marks, start, surface_start);
-                    }
+            // Close the layers this node is outside of (all of them for one lifted above the
+            // window) and the scroll bars of viewports it is outside of, deepest first: a
+            // viewport's bars draw inside the layers around it, after those its content opened.
+            loop {
+                let outside = |a: usize| !std::iter::successors(node_parent, |&p| self.nodes[p].parent).any(|p| p == a);
+                let bar = bars_open.last().map(|o| o.i).filter(|&b| outside(b));
+                let layer = layers.last().map(|l| l.0).filter(|&l| lift || raised || outside(l));
+                let close_bar = match (bar, layer) {
+                    (None, None) => break,
+                    (Some(b), Some(l)) => within(&self.nodes, b, l),
+                    (Some(_), None) => true,
+                    (None, Some(_)) => false,
+                };
+                if close_bar {
+                    let open = bars_open.pop().unwrap();
+                    self.paint_scroll_bars(open);
+                    continue;
                 }
-            }
-            while let Some(&(ancestor, start, surface_start)) = layers.last() {
-                let mut parent = node_parent;
-                while parent.is_some_and(|p| p != ancestor) { parent = self.nodes[parent.unwrap()].parent; }
-                if parent == Some(ancestor) { break; }
+                let (_, start, surface_start) = layers.pop().unwrap();
                 if active_cache.is_some_and(|ac| ac.instance_start == start) {
                     let ac = active_cache.take().unwrap();
                     self.close_cached_layer(ac, start, surface_start, &mut glyph_count);
                 } else {
                     crate::render::end_layer(&mut self.instances, &mut self.surfaces, &mut self.marks, start, surface_start);
                 }
-                layers.pop();
             }
             let n = &self.nodes[i];
             let Some(p) = self.scene.presented(n.id) else { continue };
@@ -653,7 +662,7 @@ impl<S: 'static> Runtime<S> {
             }
             // A backdrop blur samples what is drawn before it, so it goes ahead of any layer this
             // element opens (a fade still blurs the window) and of its shadows, which skip it.
-            let blur_hole = (n.vis.backdrop_blur > 0.0 && !skip_paint && visible && backdrop_blurs < crate::MAX_BACKDROP_BLURS
+            let blur_hole = (n.vis.backdrop_blur > 0.0 && !software && !skip_paint && visible && backdrop_blurs < crate::MAX_BACKDROP_BLURS
                 && effective_opacity > 0.001 && paint_own * pinh.paint_opacity * n.vis.paint_alpha > 0.001)
                 .then(|| paint_slots::push_backdrop_blur(&mut self.instances, n.vis.backdrop_blur, ([r[0], r[1], w, h], radii, n.vis_flags.continuous_corners()),
                     (clip, fade, fade_origin), rounded, sc * s, (paint_own * pinh.paint_opacity * n.vis.paint_alpha).clamp(0.0, 1.0)));
@@ -864,7 +873,7 @@ impl<S: 'static> Runtime<S> {
                 for (k, sh) in n.vis.shadows.iter().chain(stuck_shadows.1).enumerate() {
                     let c = if k >= n.vis.shadows.len() { sh.color.alpha(sh.color.a * stuck_shadows.0) }
                         else if k < P_SHADOWS.len() { self.color(n.id, P_SHADOWS[k], sh.color) } else { sh.color };
-                    if c.a <= 0.0 || sh.inset || (focus_flat && k < n.vis.shadows.len()) {
+                    if c.a <= 0.0 || sh.inset || (focus_flat && k < n.vis.shadows.len()) || (software && sh.blur > 0.0) {
                         continue;
                     }
                     let sh = &if k < n.vis.shadows.len() { self.shadow_at(n.id, k, sh) } else { *sh };
@@ -1076,7 +1085,7 @@ impl<S: 'static> Runtime<S> {
                     }
                     let c = if k >= n.vis.shadows.len() { sh.color.alpha(sh.color.a * stuck_shadows.0) }
                         else if k < P_SHADOWS.len() { self.color(n.id, P_SHADOWS[k], sh.color) } else { sh.color };
-                    if c.a <= 0.0 {
+                    if c.a <= 0.0 || (software && sh.blur > 0.0) {
                         continue;
                     }
                     let sh = &if k < n.vis.shadows.len() { self.shadow_at(n.id, k, sh) } else { *sh };
@@ -1235,11 +1244,27 @@ impl<S: 'static> Runtime<S> {
             // `:hover` applies before the press does.
             let (hit_opacity, hit_rect) = if effective_opacity > 0.001 { (effective_opacity, rect_pt) } else { (hit_opacity, intersect(rect_pt, pinh.group_rect)) };
             self.register_node_hits(i, pinh.clip, (hit_opacity, visible), hit_rect, (press_k, press_anchor));
+            let n = &self.nodes[i];
+            if n.scroll.is_some() && !n.scroll_edges.no_bar && !skip_paint && !in_cache && turn_index == 0 && effective_opacity > 0.001 {
+                bars_open.push(scroll_bars::Open { i, clip, opacity: o });
+            }
             if self.has_sticky {
                 self.fade_below_header(i, s);
             }
         }
-        while let Some((_, start, surface_start)) = layers.pop() {
+        loop {
+            let close_bar = match (bars_open.last(), layers.last()) {
+                (None, None) => break,
+                (Some(b), Some(l)) => within(&self.nodes, b.i, l.0),
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+            };
+            if close_bar {
+                let open = bars_open.pop().unwrap();
+                self.paint_scroll_bars(open);
+                continue;
+            }
+            let (_, start, surface_start) = layers.pop().unwrap();
             if active_cache.is_some_and(|ac| ac.instance_start == start) {
                 let ac = active_cache.take().unwrap();
                 self.close_cached_layer(ac, start, surface_start, &mut glyph_count);
@@ -1253,6 +1278,7 @@ impl<S: 'static> Runtime<S> {
         let queued = self.queue.len();
         let held = self.pointer.map(|(x, y)| self.refresh_hover(x, y));
         self.update_help();
+        self.end_scroll_bars();
         self.layer_scratch = layers;
         self.built = true;
         self.land_unseen_entrances();
@@ -1274,4 +1300,9 @@ impl<S: 'static> Runtime<S> {
         let interaction = (self.pointer.is_some() || self.keyboard_focus) && self.update_interaction(held);
         self.queue.len() > queued || interaction
     }
+}
+
+/// Node `node` is `ancestor` or inside it.
+fn within(nodes: &[Node], node: usize, ancestor: usize) -> bool {
+    std::iter::successors(Some(node), |&p| nodes[p].parent).any(|p| p == ancestor)
 }
