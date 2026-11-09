@@ -10,7 +10,8 @@
 //!   window also stops re-presenting unchanged frames for a second after a change.
 //! - [`set_software_rendering_effects`] leaves blurred shadows (drop and inset) and backdrop
 //!   blur out of the painted frame; crisp (zero-blur) shadows, which draw as rings or solid
-//!   copies, stay.
+//!   copies, stay. An `El::layer_opacity` (the kit's disabled controls) dims its subtree element
+//!   by element, as `El::dim` does, instead of drawing it through an offscreen layer.
 //!
 //! Low power also redraws only what changed (`render/damage.rs`): the window keeps its last
 //! frame in a texture, shades again only the rectangles whose instances changed, and copies
@@ -43,9 +44,33 @@ pub fn set_software_rendering_effects(on: bool) {
     SOFTWARE_EFFECTS.store(on, Ordering::Relaxed);
 }
 
-/// Whether blurred shadows and backdrop blur are left out.
+/// Whether blurred shadows and backdrop blur are left out, and layer opacities dim instead.
 pub fn software_rendering_effects() -> bool {
+    #[cfg(test)]
+    if let Some(on) = SOFTWARE_EFFECTS_HERE.with(std::cell::Cell::get) {
+        return on;
+    }
     SOFTWARE_EFFECTS.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// `with_software_rendering_effects`: this thread's switch, over the process's.
+    static SOFTWARE_EFFECTS_HERE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Runs `f` with software rendering effects `on` for this thread alone, so a test can flip them
+/// without touching the tests running beside it.
+#[cfg(test)]
+pub(crate) fn with_software_rendering_effects<R>(on: bool, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<bool>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SOFTWARE_EFFECTS_HERE.with(|c| c.set(self.0));
+        }
+    }
+    let _restore = Restore(SOFTWARE_EFFECTS_HERE.with(|c| c.replace(Some(on))));
+    f()
 }
 
 static REDRAWN: AtomicU64 = AtomicU64::new(0);

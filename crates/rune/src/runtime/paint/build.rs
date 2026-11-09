@@ -294,10 +294,14 @@ impl<S: 'static> Runtime<S> {
             // A fading node with children, or a shape whose pieces overlap, takes its opacity
             // once as a layer rather than each primitive taking it over the ones beneath. So
             // does a layer opacity over two paints of the node's own (a label on its fill).
+            // Software rendering (low_power.rs) dims a layer opacity element by element instead,
+            // as `El::dim` does: `paint_own` still carries it to this node's paint and, through
+            // `paint_opacity`, to its children's, but it opens no offscreen layer by itself.
+            let isolating_own = if software { own } else { paint_own };
             let mut isolate = effective_opacity > 0.001 && (p.blur > 0.0 || dissolve
-                || additive_parent || (paint_own > 0.001 && paint_own < 1.0
+                || additive_parent || (isolating_own > 0.001 && isolating_own < 1.0
                     && (next.is_some_and(|j| self.nodes[j].parent == Some(i)) || n.vis.shape.as_ref().is_some_and(|s| s.overlaps())
-                        || (n.vis.layer_opacity < 1.0 && own_paints(n) >= 2))));
+                        || (!software && n.vis.layer_opacity < 1.0 && own_paints(n) >= 2))));
             let (mut clip, mut fade) = (pinh.paint_clip, pinh.paint_fade);
             let mut fade_origin = pinh.paint_fade_origin;
             let mut rounded = pinh.rounded;

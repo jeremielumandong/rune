@@ -112,6 +112,36 @@ fn isolated_layers_match_scalar_overlap_crossfade_and_nesting() {
     assert_eq!(ordinary.layers.pipelines.capacity(), 0);
 }
 
+/// Software rendering (low_power.rs) dims a layer opacity's subtree element by element instead
+/// of drawing it offscreen: no layer target, and where two children overlap each shows through
+/// the other, as `El::dim` draws them, rather than the subtree compositing once as CSS opacity
+/// does on a GPU.
+#[test]
+fn software_rendering_dims_a_layer_opacity_instead_of_drawing_it_offscreen() {
+    fn view(_: &(), _: &mut Cx<()>) -> El {
+        el().size(32.0, 16.0)
+            .child(el().size(24.0, 8.0).absolute(4.0, 4.0).fill(Color::WHITE))
+            .child(el().size(12.0, 8.0).absolute(10.0, 4.0).fill(Color::WHITE))
+            .layer_opacity(0.5)
+    }
+    let gpu = Gpu::headless();
+    let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+    let target = Offscreen::new(&gpu.device, 32, 16);
+    for (software, targets, overlap) in [(false, 1, 0.5), (true, 0, 0.75)] {
+        crate::low_power::with_software_rendering_effects(software, || {
+            let mut rt = Runtime::new((), view, (32.0, 16.0), Env { scale: 1.0, system_dark: true });
+            rt.frame(0.0);
+            let layers = rt.instances.iter().filter(|i| i.params[1] == KIND_LAYER).count();
+            assert_eq!(layers, targets, "software={software}: layers opened");
+            renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (32, 16));
+            assert_eq!(renderer.layer_stats().targets, targets, "software={software}: layer targets");
+            let out = pixels(&gpu, &renderer, &target);
+            near(&out[(8*32+6)*4..(8*32+7)*4], rgba([0.5; 4]));
+            near(&out[(8*32+16)*4..(8*32+17)*4], rgba([overlap; 4]));
+        });
+    }
+}
+
 #[test]
 fn leaf_dimming_keeps_container_opacity_isolated() {
     fn view(alpha: &Live<f32>, _: &mut Cx<Live<f32>>) -> El {

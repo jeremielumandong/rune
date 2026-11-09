@@ -1,9 +1,14 @@
-# Vendored Rune: AgentOps patch
+# Rune: AgentOps patch
 
-This is the `rune` crate of [anomalyco/rune](https://github.com/anomalyco/rune) at
-`4ca683561a100e16b1ce32f3576f4ade61bd2924`, MIT licensed (`LICENSE`, unchanged). The root
-`Cargo.toml` patches `rune` from that repository to `crates/rune` here. The first commit that
-adds this folder is the upstream source untouched, so `git diff` against it shows the whole patch.
+AgentOps's patch to the `rune` crate of [anomalyco/rune](https://github.com/anomalyco/rune), MIT
+licensed (`LICENSE`, unchanged). It lives on the `agentops/rune-on-dev` branch of
+[jeremielumandong/rune](https://github.com/jeremielumandong/rune), on upstream `dev` at
+`565de6bb8a3449edd3dd6caa0c351bee11697964` (2026-11-09), so `git diff 565de6bb` on that branch
+shows the whole patch. AgentOpsChat and Argus vendor its `crates/rune` (their `vendor/rune`,
+which the root `Cargo.toml` patches `rune` to) and take their other Rune crates from the same
+branch and revision. Before 2026-11-09 the patch sat on upstream
+`4ca683561a100e16b1ce32f3576f4ade61bd2924`, a commit per change in AgentOpsChat's
+`vendor/rune` history.
 
 The patch brings Rune to parity with the low-power rendering of `vendor/gpui-fast` (Switchyard
 PR #31; "Windows software rendering" in that PARITY-PATCH.md) for machines with no GPU: VMs on
@@ -259,16 +264,36 @@ unchanged.
   both layouts, only the root signature differs.
 - The window's projection is its own zeroed 16-byte buffer (`Renderer::window_projection`)
   rather than an unwritten slot past the globals, which shrink to their 32 bytes.
-- Known gap: on Windows 10's WARP, 15 layer tests (`render::layers` cache, filter and rounded
-  clip tests, `render::damage` equivalence, `tooling` desktop composites) still fail, so
-  cached, blurred or composited layers may draw wrong there. They pass on Windows 11's WARP and
-  on GPUs, and the window itself draws as on Windows 11's WARP. Root cause not found: the
-  descriptor-table projection read wrong in the window pass, the root CBV reads wrong in some
-  layer passes, and staged writes into the layer projections changed which values were read.
+- On WARP a frame's uploads (instances, globals, glyph rows, layer projections) are submitted
+  ahead of the frame's encoder and waited for, never recorded into it (`render/upload.rs`,
+  `Renderer::uploads_apart`): Windows 10's WARP let a frame's draws read buffers before the
+  copies into them had landed, so a low-power damaged redraw drew differently from a whole
+  frame. The wait gives up overlapping a frame's uploads with the previous frame's drawing; on
+  a software adapter both run on the CPU anyway.
+- Known gap: on Windows 10's WARP, 13 layer tests (`render::layers` cache, filter and rounded
+  clip tests, `tooling` desktop composites) still fail, so cached, blurred or composited layers
+  may draw wrong there; a renderer's first frame drew none of a cached layer's content in the
+  cache tests. They pass on Windows 11's WARP and on GPUs, the window itself draws as on Windows
+  11's WARP, and the `render::damage` equivalence tests pass there since the uploads go ahead.
+  Root cause not found.
 - Reproduced without the VM by putting Windows 10's `d3d10warp.dll` (10.0.19041, x64, from
   Microsoft's symbol server; winbindex lists the download keys) beside the exe or test binary
   and setting `WGPU_ADAPTER_NAME="Basic Render"`; D3D12 loads a WARP beside the exe before the
   system one. `--snap` then shows the empty window, and the Rune suite runs against that WARP.
+
+### Software rendering: layer opacity
+
+- With `set_software_rendering_effects` on, an `El::layer_opacity` dims its subtree element by
+  element, as `El::dim` does, instead of drawing it through an offscreen layer
+  (`runtime/paint/build.rs`: a layer opacity no longer isolates a node by itself; a real opacity
+  fade still does). Upstream's kit draws disabled controls (buttons, icon buttons, menu and list
+  items, selects, switches, segments, radios, text inputs) with `layer_opacity` since #208, so
+  each disabled control cost an offscreen layer every frame on WARP or lavapipe, and layers are
+  what Windows 10's WARP draws worst. Where a disabled control's label overlaps its fill, the
+  fill now shows faintly through the label, as before #208. GPUs keep upstream's layer.
+- Test: `render::layers::tests::software_rendering_dims_a_layer_opacity_instead_of_drawing_it_offscreen`
+  (no layer target, and two overlapping children show through each other). A test flips the
+  switch for its own thread with `low_power::with_software_rendering_effects`.
 
 ## Not ported
 
