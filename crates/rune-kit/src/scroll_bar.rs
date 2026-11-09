@@ -836,7 +836,9 @@ fn attach(style: ScrollBarStyle, area: &str, key: &str, outer: El, viewport: El)
                 left.point(None);
             }
         })
-        .child(viewport.chain_scroll_offset(move |at| watch.follow(at, overlay)))
+        // This bar replaces the runtime's own thumb (runtime/scroll/bars.rs), so the
+        // viewport doesn't draw both.
+        .child(viewport.scroll_bar_hidden().chain_scroll_offset(move |at| watch.follow(at, overlay)))
         .child(
             el().key("scroll-bar")
                 .absolute(0.0, 0.0)
